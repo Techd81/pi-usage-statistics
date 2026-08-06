@@ -1,0 +1,7 @@
+/.agents
+/.cursor
+/.pi
+/.trellis
+node_modules/
+dist/
+coverage/
