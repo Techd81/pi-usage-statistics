@@ -404,6 +404,23 @@ describe("/usage-stats command", () => {
     }
   });
 
+  it("TC5: TUI mode opens the overlay via ctx.ui.custom; print mode never does", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const handler = usageStatsCommand(commands);
+
+    const printCtx = makeCtx({ mode: "print" });
+    await handler("", printCtx);
+    expect(vi.mocked(printCtx.ui.custom)).not.toHaveBeenCalled();
+
+    // TUI mode: the overlay factory is handed to ctx.ui.custom; the fake
+    // custom() throws, which the command reports non-fatally.
+    const tuiCtx = makeCtx({ mode: "tui" });
+    await handler("", tuiCtx);
+    expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledTimes(1);
+  });
+
   it("RC6: web starts the loopback dashboard only on explicit invocation and reports the URL; stop shuts it down", async () => {
     const store = await makeStore();
     const { api, commands } = makeHarness();

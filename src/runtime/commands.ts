@@ -83,8 +83,12 @@ export async function runUsageStatsCommand(
     const [action = ""] = args.trim().split(/\s+/);
     switch (action) {
       case "": {
-        const result: UsageQueryResult = deps.store.query(DEFAULT_FILTERS());
-        presentText(ctx, formatCompactSummary(result));
+        if (ctx.mode === "tui") {
+          await showUsageOverlay(deps, ctx);
+        } else {
+          const result: UsageQueryResult = deps.store.query(DEFAULT_FILTERS());
+          presentText(ctx, formatCompactSummary(result));
+        }
         return;
       }
       case "refresh": {
@@ -150,5 +154,19 @@ async function runWebAction(deps: CommandDependencies, ctx: ExtensionCommandCont
     }
   } catch (error) {
     presentError(ctx, "web", error);
+  }
+}
+
+/**
+ * TUI-only interactive overlay for the default action. Lazy-imports the
+ * dashboard module (pi-tui must never load in non-TUI modes) and guards
+ * every TUI API by `ctx.mode === "tui"`. Failures are reported non-fatally.
+ */
+async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    const { makeOverlayFactory } = await import("../tui/dashboard");
+    await ctx.ui.custom(makeOverlayFactory(() => ({ kind: "ready", result: deps.store.query(DEFAULT_FILTERS()) })), { overlay: true });
+  } catch (error) {
+    presentError(ctx, "tui", error);
   }
 }

@@ -1,0 +1,121 @@
+/**
+ * Terminal-safe formatting for the TUI surface. Mirrors the Web dashboard's
+ * number/cost/percent conventions (spec web-and-tui.md: shared formatting
+ * rules) so both surfaces present identical values. No ANSI codes are
+ * generated here — colors are applied by the component after truncation.
+ */
+import type { CostDisplay } from "../domain";
+
+const numberFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
+
+/** Token counts with zh-CN grouping, matching the Web surface. */
+export function formatTokens(value: number): string {
+  return numberFormat.format(value);
+}
+
+/**
+ * Cost follows the Web convention: fixed 4 decimals, `--` when unavailable,
+ * `~…（估算）` for estimated, `…（混合）` for a recorded+estimated mix.
+ */
+export function formatCost(cost: CostDisplay): string {
+  if (cost.amount === null) return "--";
+  const base = `$${cost.amount.toFixed(4)}`;
+  if (cost.status === "estimated") return `~${base}（估算）`;
+  if (cost.status === "mixed") return `${base}（混合）`;
+  return base;
+}
+
+/** Cache-hit rate; a null rate (zero denominator) renders as `--`. */
+export function formatHitRate(rate: number | null): string {
+  return rate === null ? "--" : `${rate.toFixed(1)}%`;
+}
+
+/**
+ * Columns for one character: full-width (CJK) characters count as 2,
+ * block-drawing elements (U+2580–U+259F, e.g. trend bars) as 1, everything
+ * else ASCII as 1. The CJK test is a rough heuristic (any code point above
+ * 0xff counts as full-width); block elements are narrow in every terminal
+ * and are the one notable exception.
+ */
+function charWidth(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0;
+  if (code >= 0x2580 && code <= 0x259f) return 1; // ▁▂▃▄▅▆▇█ are narrow
+  return code > 0xff ? 2 : 1;
+}
+
+/**
+ * Visible display width: full-width (CJK) characters count as 2 columns,
+ * everything else as 1. ANSI escape sequences are skipped entirely, so this
+ * stays correct for strings that were already colored.
+ */
+export function displayWidth(text: string): number {
+  let width = 0;
+  let inEscape = false;
+  for (const ch of text) {
+    if (ch === "\u001b") {
+      inEscape = true;
+      continue;
+    }
+    if (inEscape) {
+      if (ch === "m") inEscape = false; // ANSI SGR ends with 'm'
+      continue;
+    }
+    width += charWidth(ch);
+  }
+  return width;
+}
+
+/**
+ * Truncate to `width` visible columns without breaking a line or splitting
+ * an ANSI escape sequence; never throws. Escape sequences count as zero
+ * columns and are preserved — including any trailing SGR sequence (e.g. a
+ * reset) that falls past the cut point — so truncating already-colored
+ * strings never leaves the terminal in a stale color state.
+ */
+export function truncateToWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  const chars = Array.from(text); // code-point aware (surrogate pairs stay whole)
+  let used = 0;
+  let result = "";
+  let i = 0;
+  while (i < chars.length) {
+    const ch = chars[i]!;
+    if (ch === "\u001b") {
+      // Preserve the whole ANSI SGR sequence; it occupies zero columns.
+      let end = i + 1;
+      while (end < chars.length && chars[end] !== "m") end++;
+      result += chars.slice(i, Math.min(end + 1, chars.length)).join("");
+      i = end + 1;
+      continue;
+    }
+    const w = charWidth(ch);
+    if (used + w > width) {
+      // Keep any SGR sequences from the dropped tail (resets, color changes)
+      // so the terminal state after this line matches the full text.
+      result += (chars.slice(i).join("").match(/\u001b\[[0-9;]*m/g) ?? []).join("");
+      break;
+    }
+    result += ch;
+    used += w;
+    i++;
+  }
+  return result;
+}
+
+/** Vertical bar trend from a series; 8 levels, empty input renders "". */
+export function trendBar(values: readonly number[], maxLen = 80): string {
+  const bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+  if (values.length === 0) return "";
+  const capped = values.slice(0, maxLen);
+  const max = Math.max(...capped);
+  if (max <= 0) return bars[0]!.repeat(capped.length);
+  return capped
+    .map((value) => {
+      // Clamp to [0, 1]: negative values (corrupt data) map to the lowest bar
+      // instead of indexing past the start of the palette.
+      const ratio = Math.max(0, Math.min(1, value / max));
+      const index = Math.min(bars.length - 1, Math.floor(ratio * bars.length));
+      return bars[index]!;
+    })
+    .join("");
+}
