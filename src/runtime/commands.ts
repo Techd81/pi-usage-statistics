@@ -1,33 +1,28 @@
 /**
- * `/usage-stats` command implementation (design §6, RC3/RC6).
+ * `/pi-usage-statistics` command implementation (design §6).
  *
- * Actions:
- * - (none)   -> compact summary via the shared store query;
- * - `web`    -> start the loopback dashboard (only on explicit invocation),
- *               report the URL, attempt a best-effort browser open;
- * - `refresh`-> rescan session files through the store;
- * - `stop`   -> shut down the dashboard server.
+ * Arguments:
+ * - (none)   -> default scope `global`; TUI mode opens the interactive
+ *               overlay, other modes print a text summary;
+ * - `project`-> scope `project` (records of the current working directory);
+ * - `global` -> scope `global` (all locally stored sessions).
  *
- * Mode guards: `ctx.ui.custom()` is never invoked here (the TUI dashboard
- * child task owns that); TUI/rpc modes receive notifications, print mode
- * writes plain text to stdout, json mode stays silent so the JSON event
- * stream is never corrupted. All failures are reported non-fatally.
+ * Mode guards: `ctx.ui.custom()` runs only in `tui` mode; TUI/rpc modes
+ * receive notifications, print mode writes plain text to stdout, json mode
+ * stays silent so the JSON event stream is never corrupted. All failures are
+ * reported non-fatally.
  */
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UsageFilters, UsageQueryResult } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { ScanSummary, UsageStore } from "../storage";
 import { formatCompactSummary, formatScanSummary } from "./format";
-import type { WebServerHandle } from "./web-server";
+import type { Scope } from "../tui/dashboard";
+
+export type { Scope } from "../tui/dashboard";
 
 export type CommandDependencies = {
   store: UsageStore;
-  /** Server factory; a null result means the dashboard module is unavailable. */
-  createServer: () => WebServerHandle | null;
-  /** Best-effort browser open (non-fatal). */
-  openBrowser: (url: string) => void;
-  getServer: () => WebServerHandle | null;
-  setServer: (server: WebServerHandle | null) => void;
 };
 
 const DEFAULT_FILTERS = (): UsageFilters => ({
@@ -40,6 +35,25 @@ const DEFAULT_FILTERS = (): UsageFilters => ({
   bucketMs: DEFAULT_BUCKET_MS,
   includeSummaryUsage: false,
 });
+
+/** Current working directory for project-scoped queries. */
+export const projectCwd = (ctx: ExtensionContext): string => {
+  try {
+    return ctx.sessionManager?.getCwd() ?? ctx.cwd ?? "";
+  } catch {
+    return ctx.cwd ?? "";
+  }
+};
+
+/** Build query filters for a scope; project limits records to the cwd. */
+export const filtersForScope = (scope: Scope, ctx: ExtensionContext): UsageFilters => {
+  const filters = DEFAULT_FILTERS();
+  if (scope === "project") {
+    const cwd = projectCwd(ctx);
+    if (cwd !== "") filters.projects = [cwd];
+  }
+  return filters;
+};
 
 /**
  * Mode-aware text output: TUI/rpc notify, print stdout, json silent (stdout
@@ -61,8 +75,8 @@ export function presentText(ctx: ExtensionContext, text: string): void {
 
 function presentError(ctx: ExtensionCommandContext, action: string, error: unknown): void {
   const detail = error instanceof Error ? error.message : String(error);
-  const message = `usage-stats: ${action} failed: ${detail}`;
-  console.error(`[usage-stats] ${action} failed: ${detail}`);
+  const message = `pi-usage-statistics: ${action} failed: ${detail}`;
+  console.error(`[pi-usage-statistics] ${action} failed: ${detail}`);
   if (ctx.mode === "print") {
     process.stdout.write(`${message}\n`);
   } else {
@@ -80,92 +94,50 @@ export async function runUsageStatsCommand(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   try {
-    const [action = ""] = args.trim().split(/\s+/);
-    switch (action) {
-      case "": {
-        if (ctx.mode === "tui") {
-          await showUsageOverlay(deps, ctx);
-        } else {
-          const result: UsageQueryResult = deps.store.query(DEFAULT_FILTERS());
-          presentText(ctx, formatCompactSummary(result));
-        }
-        return;
-      }
-      case "refresh": {
-        try {
-          const summary: ScanSummary = await deps.store.refresh();
-          presentText(ctx, formatScanSummary(summary));
-        } catch (error) {
-          presentError(ctx, "refresh", error);
-        }
-        return;
-      }
-      case "web": {
-        await runWebAction(deps, ctx);
-        return;
-      }
-      case "stop": {
-        const server = deps.getServer();
-        if (!server) {
-          presentText(ctx, "Web dashboard is not running.");
-          return;
-        }
-        try {
-          await server.stop();
-          deps.setServer(null);
-          presentText(ctx, "Web dashboard stopped.");
-        } catch (error) {
-          presentError(ctx, "stop", error);
-        }
-        return;
-      }
-      default: {
-        presentError(ctx, action, new Error("unknown action; expected one of: web, refresh, stop"));
-        return;
-      }
+    const [arg = ""] = args.trim().split(/\s+/);
+    if (arg !== "" && arg !== "project" && arg !== "global" && arg !== "refresh") {
+      presentError(ctx, arg, new Error("unknown argument; expected: project | global | refresh"));
+      return;
     }
+
+    if (arg === "refresh") {
+      try {
+        const summary: ScanSummary = await deps.store.refresh();
+        presentText(ctx, formatScanSummary(summary));
+      } catch (error) {
+        presentError(ctx, "refresh", error);
+      }
+      return;
+    }
+
+    const scope: Scope = arg === "project" ? "project" : "global";
+
+    if (ctx.mode === "tui") {
+      await showUsageOverlay(deps, ctx, scope);
+      return;
+    }
+
+    const result: UsageQueryResult = deps.store.query(filtersForScope(scope, ctx));
+    presentText(ctx, formatCompactSummary(result, scope, projectCwd(ctx)));
   } catch (error) {
     // Safety net: no error may escape into Pi (spec/typescript/error-handling.md).
-    presentError(ctx, "usage-stats", error);
-  }
-}
-
-async function runWebAction(deps: CommandDependencies, ctx: ExtensionCommandContext): Promise<void> {
-  const running = deps.getServer();
-  if (running && running.isRunning()) {
-    presentText(ctx, `Web dashboard already running at ${running.getUrl() ?? "unknown URL"}`);
-    return;
-  }
-  const handle = deps.createServer();
-  if (!handle) {
-    // Non-fatal: the dashboard module is not available yet (web-dashboard
-    // child task). Pi keeps running; the compact summary still works.
-    presentError(ctx, "web", new Error("web dashboard module is not available; install or build the web-dashboard package"));
-    return;
-  }
-  try {
-    const url = await handle.start();
-    deps.setServer(handle);
-    presentText(ctx, `Web dashboard started at ${url}`);
-    try {
-      deps.openBrowser(url); // best-effort; a failed open leaves the URL usable
-    } catch (error) {
-      console.error(`[usage-stats] browser open failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } catch (error) {
-    presentError(ctx, "web", error);
+    presentError(ctx, "pi-usage-statistics", error);
   }
 }
 
 /**
- * TUI-only interactive overlay for the default action. Lazy-imports the
- * dashboard module (pi-tui must never load in non-TUI modes) and guards
- * every TUI API by `ctx.mode === "tui"`. Failures are reported non-fatally.
+ * TUI-only interactive overlay. Lazy-imports the dashboard module (pi-tui
+ * must never load in non-TUI modes) and guards every TUI API by
+ * `ctx.mode === "tui"`. Failures are reported non-fatally.
  */
-async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext): Promise<void> {
+async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext, scope: Scope): Promise<void> {
   try {
     const { makeOverlayFactory } = await import("../tui/dashboard");
-    await ctx.ui.custom(makeOverlayFactory(() => ({ kind: "ready", result: deps.store.query(DEFAULT_FILTERS()) })), { overlay: true });
+    const cwd = projectCwd(ctx);
+    await ctx.ui.custom(
+      makeOverlayFactory({ store: deps.store, projectCwd: cwd, initialScope: scope }),
+      { overlay: true },
+    );
   } catch (error) {
     presentError(ctx, "tui", error);
   }

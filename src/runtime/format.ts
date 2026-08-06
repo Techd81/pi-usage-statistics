@@ -6,14 +6,16 @@
 import type { UsageQueryResult } from "../domain";
 import type { ScanSummary } from "../storage";
 
-/** Compact summary for the default /usage-stats action (shared query). */
-export function formatCompactSummary(result: UsageQueryResult): string {
+/** Compact summary for the /pi-usage-statistics command (shared query). */
+export function formatCompactSummary(result: UsageQueryResult, scope: "global" | "project" = "global", cwd = ""): string {
   const totals = result.totals;
   const cost =
     totals.cost.amount === null ? "--" : `$${totals.cost.amount.toFixed(4)} (${totals.cost.status})`;
   const hitRate = totals.cacheHitRate === null ? "--" : `${totals.cacheHitRate.toFixed(1)}%`;
+  const scopeLine = scope === "project" ? `  scope:         project (${cwd})` : "  scope:         global";
   return [
     "Token usage statistics",
+    scopeLine,
     `  requests:      ${totals.requestCount}`,
     `  total tokens:  ${totals.totalTokens}`,
     `    input:       ${totals.inputTokens}`,

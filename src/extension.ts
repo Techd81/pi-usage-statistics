@@ -8,7 +8,9 @@
  *                        background scan;
  * - `message_end`     -> collector (see src/runtime/collector.ts);
  * - `model_select`    -> no-op (query dimensions are derived per query);
- * - `session_shutdown`-> stop timers/server, flush pending writes.
+ * - `session_shutdown`-> stop timers, flush pending writes.
+ *
+ * Command: `/pi-usage-statistics` (TUI-only product; no web surface).
  *
  * Error pathway: every async handler is wrapped; failures are reported via
  * `ctx.ui.notify`/stdout and logged, never rethrown into Pi
@@ -16,13 +18,10 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { UsageStore, type ScanSummary } from "./storage";
-import { openInBrowser } from "./runtime/browser";
 import { collectMessageEnd } from "./runtime/collector";
 import { presentText, runUsageStatsCommand } from "./runtime/commands";
 import { formatScanSummary } from "./runtime/format";
 import { DebouncedScanScheduler } from "./runtime/scan-scheduler";
-import { createUsageDashboardServer } from "./web/server";
-import type { WebServerHandle } from "./runtime/web-server";
 
 export const DEFAULT_SCAN_DEBOUNCE_MS = 1000;
 
@@ -31,26 +30,18 @@ export type UsageStatsExtensionOptions = {
   store?: UsageStore;
   /** Debounce window for the background scan. */
   scanDebounceMs?: number;
-  /** Server factory override (tests); defaults to a dashboard server over the extension's own store. */
-  createServer?: () => WebServerHandle | null;
-  /** Browser-open override (tests); defaults to the OS command. */
-  openBrowser?: (url: string) => void;
 };
 
 export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStatsExtensionOptions = {}): void {
   const store: UsageStore = options.store ?? new UsageStore();
   const scanDebounceMs = options.scanDebounceMs ?? DEFAULT_SCAN_DEBOUNCE_MS;
-  const createServer = options.createServer ?? (() => createUsageDashboardServer(store));
-  const openBrowser = options.openBrowser ?? openInBrowser;
-
-  let server: WebServerHandle | null = null;
   let lastCtx: ExtensionContext | undefined;
 
   const notifyError = (ctx: ExtensionContext | undefined, action: string, error: unknown): void => {
     const detail = error instanceof Error ? error.message : String(error);
-    console.error(`[usage-stats] ${action} failed: ${detail}`);
+    console.error(`[pi-usage-statistics] ${action} failed: ${detail}`);
     try {
-      ctx?.ui.notify(`usage-stats: ${action} failed: ${detail}`, "error");
+      ctx?.ui.notify(`pi-usage-statistics: ${action} failed: ${detail}`, "error");
     } catch {
       // The UI itself may be unavailable (e.g. during teardown); never throw.
     }
@@ -90,20 +81,11 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
 
   pi.on("session_shutdown", async (_event, ctx) => {
     // Stop runtime resources first; each failure is isolated so a broken
-    // server can never block the pending-write flush (RC4).
+    // step can never block the pending-write flush (RC4).
     try {
       await scheduler.settle(); // cancel pending pass + wait for in-flight scan
     } catch (error) {
       notifyError(ctx, "shutdown (scan)", error);
-    }
-    if (server) {
-      const current = server;
-      server = null;
-      try {
-        await current.stop();
-      } catch (error) {
-        notifyError(ctx, "shutdown (server)", error);
-      }
     }
     try {
       await store.stop(); // flushes pending writes (RC4)
@@ -112,22 +94,9 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
     }
   });
 
-  pi.registerCommand("usage-stats", {
+  pi.registerCommand("pi-usage-statistics", {
     description:
-      "Token usage statistics. Actions: (none) compact summary, web (dashboard), refresh (rescan), stop (shut down dashboard).",
-    handler: (args, ctx) =>
-      runUsageStatsCommand(
-        {
-          store,
-          createServer,
-          openBrowser,
-          getServer: () => server,
-          setServer: (next) => {
-            server = next;
-          },
-        },
-        args,
-        ctx,
-      ),
+      "Token usage statistics (TUI). Optional argument: project | global (scope). No argument defaults to global.",
+    handler: (args, ctx) => runUsageStatsCommand({ store }, args, ctx),
   });
 }

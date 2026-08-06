@@ -119,3 +119,22 @@ export function trendBar(values: readonly number[], maxLen = 80): string {
     })
     .join("");
 }
+
+/** Display label for a time-range selector. */
+export function timeRangeLabel(range: "today" | "7d" | "30d" | "all"): string {
+  switch (range) {
+    case "today":
+      return "今天";
+    case "7d":
+      return "7天";
+    case "30d":
+      return "30天";
+    case "all":
+      return "全部";
+  }
+}
+
+/** Display label for the project/global scope. */
+export function scopeLabel(scope: "global" | "project"): string {
+  return scope === "project" ? "项目" : "全局";
+}

@@ -1,16 +1,14 @@
 /**
- * Runtime harness tests (RC1–RC6): the extension factory wired to a fake
+ * Runtime harness tests (RC1–RC5): the extension factory wired to a fake
  * ExtensionAPI, a temp-dir UsageStore, and a fake context.
  *
  * - RC1: one finalized assistant message -> exactly one normalized record
  *        with correct fields; re-delivery and rescanning never change totals.
  * - RC2: message_update is never subscribed, so streaming updates can never
  *        create records.
- * - RC3: /usage-stats runs in print/json modes without TUI-only APIs.
+ * - RC3: /pi-usage-statistics runs in print/json modes without TUI-only APIs.
  * - RC4: session_shutdown flushes pending writes and stops runtime resources.
- * - RC5: scanner/index/server failures are reported non-fatally; Pi continues.
- * - RC6: web starts the loopback dashboard only on explicit invocation,
- *        reports the URL; stop shuts it down.
+ * - RC5: scanner/collector failures are reported non-fatally; Pi continues.
  */
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,7 +27,6 @@ import type { UsageFilters } from "../../domain";
 import { DEFAULT_BUCKET_MS } from "../../domain";
 import usageStatsExtension from "../../extension";
 import { UsageStore } from "../../storage";
-import type { WebServerHandle } from "../web-server";
 
 // --- Mock the Pi runtime module (isolation for store dir + scanner) --------
 
@@ -154,20 +151,7 @@ const toolResultMessageEndEvent = (toolCallId: string, input: number, output: nu
     },
   }) as unknown as MessageEndEvent;
 
-function makeFakeServer(): WebServerHandle & { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> } {
-  let running = false;
-  let url: string | undefined;
-  const start = vi.fn(async () => {
-    running = true;
-    url = "http://127.0.0.1:8765";
-    return url;
-  });
-  const stop = vi.fn(async () => {
-    running = false;
-    url = undefined;
-  });
-  return { start, stop, isRunning: () => running, getUrl: () => url };
-}
+
 
 class ThrowingStore extends UsageStore {
   override upsertRecord(): void {
@@ -200,7 +184,7 @@ async function makeStore(): Promise<UsageStore> {
 }
 
 const usageStatsCommand = (commands: RegisteredCommand[]): RegisteredCommand["options"]["handler"] =>
-  commands.find((command) => command.name === "usage-stats")!.options.handler;
+  commands.find((command) => command.name === "pi-usage-statistics")!.options.handler;
 
 // --- RC1 / RC2 ---------------------------------------------------------------
 
@@ -377,7 +361,7 @@ describe("message_end collector", () => {
 
 // --- RC3 / RC6 ----------------------------------------------------------------
 
-describe("/usage-stats command", () => {
+describe("/pi-usage-statistics command", () => {
   it("RC3: runs in print/json modes without invoking TUI-only APIs", async () => {
     const store = await makeStore();
     const { api, commands } = makeHarness();
@@ -390,8 +374,8 @@ describe("/usage-stats command", () => {
         const ctx = makeCtx({ mode });
         await handler("", ctx);
         await handler("refresh", ctx);
-        await handler("web", ctx); // no factory registered -> non-fatal notice
-        await handler("stop", ctx);
+        await handler("project", ctx);
+        await handler("global", ctx);
         // The fake custom() throws when called; reaching here proves no
         // TUI-only API was invoked in either mode.
         expect(ctx.ui.custom).not.toHaveBeenCalled();
@@ -421,71 +405,6 @@ describe("/usage-stats command", () => {
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledTimes(1);
   });
 
-  it("RC6: web starts the loopback dashboard only on explicit invocation and reports the URL; stop shuts it down", async () => {
-    const store = await makeStore();
-    const { api, commands } = makeHarness();
-    const server = makeFakeServer();
-    const openBrowser = vi.fn();
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => server, openBrowser });
-    const handler = usageStatsCommand(commands);
-    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    const ctx = makeCtx({ mode: "print" });
-
-    try {
-      // Not started by the factory or by session_start.
-      expect(server.start).not.toHaveBeenCalled();
-      expect(server.isRunning()).toBe(false);
-
-      await handler("web", ctx);
-      expect(server.start).toHaveBeenCalledTimes(1);
-      expect(server.isRunning()).toBe(true);
-      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("http://127.0.0.1:8765"));
-      expect(openBrowser).toHaveBeenCalledWith("http://127.0.0.1:8765");
-
-      // Invoking web again while running does not restart the server.
-      await handler("web", ctx);
-      expect(server.start).toHaveBeenCalledTimes(1);
-
-      await handler("stop", ctx);
-      expect(server.stop).toHaveBeenCalledTimes(1);
-      expect(server.isRunning()).toBe(false);
-      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("Web dashboard stopped."));
-    } finally {
-      stdoutSpy.mockRestore();
-    }
-  });
-
-  it("RC6b: the default web server shares the extension's store, so live records are visible without a restart", async () => {
-    const store = await makeStore();
-    const { api, handlers, commands } = makeHarness();
-    const openBrowser = vi.fn();
-    // No createServer override: the default factory wires the extension's own
-    // store, so records collected via message_end are served immediately.
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, openBrowser });
-    const ctx = makeCtx();
-    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
-    await fire(handlers, assistantMessageEndEvent("msg-live", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }), ctx);
-
-    const handler = usageStatsCommand(commands);
-    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    try {
-      await handler("web", ctx);
-      const output = stdoutSpy.mock.calls.map(([chunk]) => String(chunk)).join("");
-      const url = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-      expect(url).toBeTruthy();
-
-      const response = await fetch(`${url}/api/usage`);
-      expect(response.ok).toBe(true);
-      const body = (await response.json()) as { totals: { requestCount: number; inputTokens: number } };
-      // The live record is served immediately: the dashboard shares the store.
-      expect(body.totals.requestCount).toBe(1);
-      expect(body.totals.inputTokens).toBe(10);
-
-      await handler("stop", ctx);
-    } finally {
-      stdoutSpy.mockRestore();
-    }
-  });
 });
 
 // --- RC4 / RC5 ----------------------------------------------------------------
@@ -493,9 +412,8 @@ describe("/usage-stats command", () => {
 describe("lifecycle and error pathway", () => {
   it("RC4: session_shutdown flushes pending writes and stops runtime resources", async () => {
     const store = await makeStore();
-    const { api, handlers, commands } = makeHarness();
-    const server = makeFakeServer();
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => server, openBrowser: vi.fn() });
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
     const ctx = makeCtx();
     await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
     await fire(handlers, assistantMessageEndEvent("msg-4", { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 }), ctx);
@@ -504,16 +422,10 @@ describe("lifecycle and error pathway", () => {
     const before = await readFile(join(storeDir, "records.jsonl"), "utf8").catch(() => "");
     expect(before).not.toContain("msg-4");
 
-    // Start the web server so shutdown must stop it too.
-    await usageStatsCommand(commands)("web", ctx);
-    expect(server.isRunning()).toBe(true);
-
     await fire(handlers, { type: "session_shutdown", reason: "quit" }, ctx);
 
     const after = await readFile(join(storeDir, "records.jsonl"), "utf8");
     expect(after).toContain("msg-4");
-    expect(server.stop).toHaveBeenCalledTimes(1);
-    expect(server.isRunning()).toBe(false);
   });
 
   it("RC5a: a background scan failure is reported non-fatally and Pi continues", async () => {
@@ -550,44 +462,4 @@ describe("lifecycle and error pathway", () => {
     expect(vi.mocked(ctx.ui.notify)).toHaveBeenCalledWith(expect.stringContaining("collect usage failed"), "error");
   });
 
-  it("RC5c: an unavailable web server is reported non-fatally", async () => {
-    const store = await makeStore();
-    const { api, commands } = makeHarness();
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => null }); // dashboard module unavailable
-    const handler = usageStatsCommand(commands);
-    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    const ctx = makeCtx({ mode: "print" });
-
-    try {
-      await handler("web", ctx);
-      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("web dashboard module is not available"));
-      expect(ctx.ui.custom).not.toHaveBeenCalled();
-    } finally {
-      stdoutSpy.mockRestore();
-    }
-  });
-
-  it("RC5d: a failed server start is reported non-fatally and does not crash the command", async () => {
-    const store = await makeStore();
-    const { api, commands } = makeHarness();
-    const failing: WebServerHandle = {
-      start: vi.fn(async () => {
-        throw new Error("port in use");
-      }),
-      stop: vi.fn(async () => {}),
-      isRunning: () => false,
-      getUrl: () => undefined,
-    };
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => failing, openBrowser: vi.fn() });
-    const ctx = makeCtx({ mode: "print" });
-    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      await usageStatsCommand(commands)("web", ctx);
-      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("web failed"));
-      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("port in use"));
-    } finally {
-      stdoutSpy.mockRestore();
-    }
-  });
 });
