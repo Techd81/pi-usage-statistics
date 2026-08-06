@@ -236,4 +236,12 @@ describe("applyCostPolicy", () => {
     expect(record.costKind).toBe("unavailable");
     expect(record.estimatedCost).toBeUndefined();
   });
+
+  it("stays unavailable for a zero-token record even when the price is known (missing usage is not free)", () => {
+    const record = makeRecord(); // anthropic/claude-sonnet-4-5, price known, zero tokens
+    expect(record.totalTokens).toBe(0);
+    const result = applyCostPolicy(record);
+    expect(result.costKind).toBe("unavailable");
+    expect(result.estimatedCost).toBeUndefined();
+  });
 });

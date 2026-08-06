@@ -1,0 +1,544 @@
+/**
+ * Runtime harness tests (RC1–RC6): the extension factory wired to a fake
+ * ExtensionAPI, a temp-dir UsageStore, and a fake context.
+ *
+ * - RC1: one finalized assistant message -> exactly one normalized record
+ *        with correct fields; re-delivery and rescanning never change totals.
+ * - RC2: message_update is never subscribed, so streaming updates can never
+ *        create records.
+ * - RC3: /usage-stats runs in print/json modes without TUI-only APIs.
+ * - RC4: session_shutdown flushes pending writes and stops runtime resources.
+ * - RC5: scanner/index/server failures are reported non-fatally; Pi continues.
+ * - RC6: web starts the loopback dashboard only on explicit invocation,
+ *        reports the URL; stop shuts it down.
+ */
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  ExtensionUIContext,
+  MessageEndEvent,
+  SessionEntry,
+  SessionInfo,
+} from "@earendil-works/pi-coding-agent";
+import type { UsageFilters } from "../../domain";
+import { DEFAULT_BUCKET_MS } from "../../domain";
+import usageStatsExtension from "../../extension";
+import { UsageStore } from "../../storage";
+import type { WebServerHandle } from "../web-server";
+
+// --- Mock the Pi runtime module (isolation for store dir + scanner) --------
+
+const sessionFiles = new Map<string, SessionEntry[]>();
+const sessionInfos: SessionInfo[] = [];
+
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+  getAgentDir: () => process.env.PI_AGENT_DIR_TEST ?? "/tmp/pi-agent",
+  SessionManager: {
+    listAll: vi.fn(async (_sessionDir?: string) => [...sessionInfos]),
+    open: vi.fn((path: string) => ({
+      getEntries: () => sessionFiles.get(path) ?? [],
+    })),
+  },
+}));
+
+// --- Harness helpers --------------------------------------------------------
+
+type Handler = (event: unknown, ctx: unknown) => unknown;
+type RegisteredCommand = { name: string; options: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> } };
+
+function makeHarness(): {
+  api: ExtensionAPI;
+  handlers: Map<string, Handler[]>;
+  commands: RegisteredCommand[];
+} {
+  const handlers = new Map<string, Handler[]>();
+  const commands: RegisteredCommand[] = [];
+  const api = {
+    on: (event: string, handler: Handler) => {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    registerCommand: (name: string, options: RegisteredCommand["options"]) => commands.push({ name, options }),
+  } as unknown as ExtensionAPI;
+  return { api, handlers, commands };
+}
+
+async function fire<E extends { type: string }>(handlers: Map<string, Handler[]>, event: E, ctx: ExtensionContext): Promise<void> {
+  for (const handler of handlers.get(event.type) ?? []) {
+    await handler(event, ctx);
+  }
+}
+
+function makeCtx(overrides: {
+  mode?: ExtensionContext["mode"];
+  sessionId?: string;
+  sessionPath?: string;
+  projectCwd?: string;
+} = {}): ExtensionCommandContext {
+  const ui = {
+    notify: vi.fn(),
+    custom: vi.fn(async () => {
+      throw new Error("TUI-only API invoked in non-TUI mode");
+    }),
+    select: vi.fn(async () => undefined),
+    confirm: vi.fn(async () => false),
+    input: vi.fn(async () => undefined),
+    setStatus: vi.fn(),
+  } as unknown as ExtensionUIContext;
+  return {
+    ui,
+    mode: overrides.mode ?? "print",
+    hasUI: false,
+    cwd: "/projects/p1",
+    sessionManager: {
+      getSessionId: () => overrides.sessionId ?? "s1",
+      getSessionFile: () => overrides.sessionPath ?? "/sessions/s1.jsonl",
+      getCwd: () => overrides.projectCwd ?? "/projects/p1",
+    },
+  } as unknown as ExtensionCommandContext;
+}
+
+const defaultFilters = (): UsageFilters => ({
+  providers: [],
+  models: [],
+  projects: [],
+  sessions: [],
+  fromMs: 0,
+  toMs: Number.POSITIVE_INFINITY,
+  bucketMs: DEFAULT_BUCKET_MS,
+  includeSummaryUsage: false,
+});
+
+const assistantMessageEndEvent = (
+  responseId: string,
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number },
+): MessageEndEvent =>
+  ({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "hello" }],
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      usage: {
+        input: tokens.input,
+        output: tokens.output,
+        cacheRead: tokens.cacheRead,
+        cacheWrite: tokens.cacheWrite,
+        totalTokens: tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite,
+        cost: { input: 0.003, output: 0.015, cacheRead: 0.0003, cacheWrite: 0.00375, total: 0.02205 },
+      },
+      responseId,
+      stopReason: "stop",
+      timestamp: 1_700_000_000_000,
+    },
+  }) as unknown as MessageEndEvent;
+
+const toolResultMessageEndEvent = (toolCallId: string, input: number, output: number): MessageEndEvent =>
+  ({
+    type: "message_end",
+    message: {
+      role: "toolResult",
+      toolCallId,
+      toolName: "bash",
+      content: [{ type: "text", text: "ok" }],
+      isError: false,
+      timestamp: 1_700_000_001_000,
+      usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    },
+  }) as unknown as MessageEndEvent;
+
+function makeFakeServer(): WebServerHandle & { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> } {
+  let running = false;
+  let url: string | undefined;
+  const start = vi.fn(async () => {
+    running = true;
+    url = "http://127.0.0.1:8765";
+    return url;
+  });
+  const stop = vi.fn(async () => {
+    running = false;
+    url = undefined;
+  });
+  return { start, stop, isRunning: () => running, getUrl: () => url };
+}
+
+class ThrowingStore extends UsageStore {
+  override upsertRecord(): void {
+    throw new Error("store boom");
+  }
+}
+
+// --- Test file setup --------------------------------------------------------
+
+let storeDir: string;
+let sessionDir: string;
+
+beforeEach(async () => {
+  process.env.PI_AGENT_DIR_TEST = await mkdtemp(join(tmpdir(), "pi-runtime-agent-"));
+  sessionDir = await mkdtemp(join(tmpdir(), "pi-runtime-sessions-"));
+  storeDir = await mkdtemp(join(tmpdir(), "pi-runtime-store-"));
+  sessionInfos.length = 0;
+  sessionFiles.clear();
+  vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete process.env.PI_AGENT_DIR_TEST;
+});
+
+async function makeStore(): Promise<UsageStore> {
+  const store = new UsageStore({ storeDir, sessionDir });
+  return store;
+}
+
+const usageStatsCommand = (commands: RegisteredCommand[]): RegisteredCommand["options"]["handler"] =>
+  commands.find((command) => command.name === "usage-stats")!.options.handler;
+
+// --- RC1 / RC2 ---------------------------------------------------------------
+
+describe("message_end collector", () => {
+  it("RC1: one finalized assistant message records exactly one normalized record; re-delivery and rescan do not change totals", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+
+    const event = assistantMessageEndEvent("msg-1", { input: 100, output: 50, cacheRead: 20, cacheWrite: 10 });
+    await fire(handlers, event, ctx);
+
+    let result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.inputTokens).toBe(100);
+    expect(result.totals.outputTokens).toBe(50);
+    expect(result.totals.cacheReadTokens).toBe(20);
+    expect(result.totals.cacheWriteTokens).toBe(10);
+    expect(result.totals.totalTokens).toBe(180);
+    expect(result.totals.cacheHitRate).toBeCloseTo((20 / 130) * 100, 5);
+    expect(result.totals.cost.status).toBe("recorded");
+    expect(result.dimensions.providers).toEqual(["anthropic"]);
+    expect(result.dimensions.models).toEqual(["claude-sonnet-4-5"]);
+
+    // Re-delivery of the same finalized message upserts the same recordId.
+    await fire(handlers, event, ctx);
+    result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.totalTokens).toBe(180);
+
+    // Reconciliation scan (no session files) does not change totals.
+    await store.refresh();
+    result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.inputTokens).toBe(100);
+  });
+
+  it("RC1b: assistant messages without usage still count as requests (zero tokens)", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+    const event = {
+      type: "message_end",
+      message: { role: "assistant", content: [], provider: "anthropic", model: "claude-sonnet-4-5", responseId: "msg-nou", stopReason: "error", timestamp: 1_700_000_000_000 },
+    } as unknown as MessageEndEvent;
+    await fire(handlers, event, ctx);
+    const result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.totalTokens).toBe(0);
+    expect(result.totals.cost.status).toBe("unavailable");
+  });
+
+  it("RC1c: toolResult usage is recorded separately as summary usage (included only per query flag)", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+    await fire(handlers, assistantMessageEndEvent("msg-2", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }), ctx);
+    await fire(handlers, toolResultMessageEndEvent("call-1", 30, 15), ctx);
+
+    const withoutSummaries = store.query(defaultFilters());
+    expect(withoutSummaries.totals.requestCount).toBe(1);
+    expect(withoutSummaries.totals.inputTokens).toBe(10);
+
+    const withSummaries = store.query({ ...defaultFilters(), includeSummaryUsage: true });
+    expect(withSummaries.totals.inputTokens).toBe(40);
+    expect(withSummaries.totals.requestCount).toBe(1); // summaries never add requests
+  });
+
+  it("RC1d: a live record and a scan of the same message share one recordId (responseId identity)", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+
+    await fire(handlers, assistantMessageEndEvent("resp-1", { input: 100, output: 50, cacheRead: 20, cacheWrite: 10 }), ctx);
+
+    // The same message now exists in the session file — but with Pi's
+    // entry.id (8-char hex), NOT the provider responseId. The scanner must
+    // upsert the SAME recordId (via the shared responseId rule), otherwise
+    // the message counts twice and reconciliation changes totals (RC1).
+    const sessionPath = "/sessions/s1.jsonl";
+    sessionInfos.push({ path: sessionPath, id: "s1", cwd: "/projects/p1", created: new Date(), modified: new Date(), messageCount: 1, firstMessage: "", allMessagesText: "" });
+    sessionFiles.set(sessionPath, [
+      {
+        type: "message",
+        id: "a1b2c3d4",
+        parentId: null,
+        timestamp: "2026-08-06T00:01:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "hello" }],
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+          usage: { input: 100, output: 50, cacheRead: 20, cacheWrite: 10, totalTokens: 180, cost: { input: 0.003, output: 0.015, cacheRead: 0.0003, cacheWrite: 0.00375, total: 0.02205 } },
+          responseId: "resp-1",
+          stopReason: "stop",
+          timestamp: 1_700_000_000_000,
+        },
+      } as SessionEntry,
+    ]);
+
+    await store.refresh();
+    const result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.totalTokens).toBe(180);
+    expect(result.dimensions.sessions).toEqual(["s1"]);
+  });
+
+  it("RC1e: messages without a responseId still share one identity between live and scan", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+
+    const event = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "fingerprint me" }],
+        provider: "openai",
+        model: "gpt-4o",
+        usage: { input: 12, output: 8, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: 1_700_000_000_000,
+        // no responseId: identity must fall back to timestamp+content fingerprint
+      },
+    } as unknown as MessageEndEvent;
+    await fire(handlers, event, ctx);
+
+    const sessionPath = "/sessions/s1.jsonl";
+    sessionInfos.push({ path: sessionPath, id: "s1", cwd: "/projects/p1", created: new Date(), modified: new Date(), messageCount: 1, firstMessage: "", allMessagesText: "" });
+    sessionFiles.set(sessionPath, [
+      {
+        type: "message",
+        id: "deadbeef",
+        parentId: null,
+        timestamp: "2026-08-06T00:01:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "fingerprint me" }],
+          provider: "openai",
+          model: "gpt-4o",
+          usage: { input: 12, output: 8, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: 1_700_000_000_000,
+        },
+      } as SessionEntry,
+    ]);
+
+    await store.refresh();
+    const result = store.query(defaultFilters());
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.totals.totalTokens).toBe(20);
+  });
+
+  it("RC2: message_update is never subscribed, so streaming updates cannot create records", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    expect(handlers.has("message_update")).toBe(false);
+    expect(handlers.has("message_end")).toBe(true);
+
+    const ctx = makeCtx();
+    // A message_update event dispatched to the runtime reaches no handler.
+    await fire(handlers, { type: "message_update", message: assistantMessageEndEvent("msg-3", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }).message }, ctx);
+    expect(store.query(defaultFilters()).totals.requestCount).toBe(0);
+  });
+});
+
+// --- RC3 / RC6 ----------------------------------------------------------------
+
+describe("/usage-stats command", () => {
+  it("RC3: runs in print/json modes without invoking TUI-only APIs", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const handler = usageStatsCommand(commands);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      for (const mode of ["print", "json"] as const) {
+        const ctx = makeCtx({ mode });
+        await handler("", ctx);
+        await handler("refresh", ctx);
+        await handler("web", ctx); // no factory registered -> non-fatal notice
+        await handler("stop", ctx);
+        // The fake custom() throws when called; reaching here proves no
+        // TUI-only API was invoked in either mode.
+        expect(ctx.ui.custom).not.toHaveBeenCalled();
+      }
+      // print mode surfaces text on stdout, json mode stays silent.
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("requests:"));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("Scan finished:"));
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("RC6: web starts the loopback dashboard only on explicit invocation and reports the URL; stop shuts it down", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    const server = makeFakeServer();
+    const openBrowser = vi.fn();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => server, openBrowser });
+    const handler = usageStatsCommand(commands);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const ctx = makeCtx({ mode: "print" });
+
+    try {
+      // Not started by the factory or by session_start.
+      expect(server.start).not.toHaveBeenCalled();
+      expect(server.isRunning()).toBe(false);
+
+      await handler("web", ctx);
+      expect(server.start).toHaveBeenCalledTimes(1);
+      expect(server.isRunning()).toBe(true);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("http://127.0.0.1:8765"));
+      expect(openBrowser).toHaveBeenCalledWith("http://127.0.0.1:8765");
+
+      // Invoking web again while running does not restart the server.
+      await handler("web", ctx);
+      expect(server.start).toHaveBeenCalledTimes(1);
+
+      await handler("stop", ctx);
+      expect(server.stop).toHaveBeenCalledTimes(1);
+      expect(server.isRunning()).toBe(false);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("Web dashboard stopped."));
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+});
+
+// --- RC4 / RC5 ----------------------------------------------------------------
+
+describe("lifecycle and error pathway", () => {
+  it("RC4: session_shutdown flushes pending writes and stops runtime resources", async () => {
+    const store = await makeStore();
+    const { api, handlers, commands } = makeHarness();
+    const server = makeFakeServer();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => server, openBrowser: vi.fn() });
+    const ctx = makeCtx();
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+    await fire(handlers, assistantMessageEndEvent("msg-4", { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 }), ctx);
+
+    // The record is in memory; nothing is on disk until a flush.
+    const before = await readFile(join(storeDir, "records.jsonl"), "utf8").catch(() => "");
+    expect(before).not.toContain("msg-4");
+
+    // Start the web server so shutdown must stop it too.
+    await usageStatsCommand(commands)("web", ctx);
+    expect(server.isRunning()).toBe(true);
+
+    await fire(handlers, { type: "session_shutdown", reason: "quit" }, ctx);
+
+    const after = await readFile(join(storeDir, "records.jsonl"), "utf8");
+    expect(after).toContain("msg-4");
+    expect(server.stop).toHaveBeenCalledTimes(1);
+    expect(server.isRunning()).toBe(false);
+  });
+
+  it("RC5a: a background scan failure is reported non-fatally and Pi continues", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 0 });
+    const ctx = makeCtx();
+
+    // The UsageStore degrades a SessionManager.listAll failure into a
+    // non-fatal sessionErrors summary, so to exercise the extension's
+    // notifyError pathway we make the scan itself throw.
+    const refreshSpy = vi.spyOn(store, "refresh").mockRejectedValueOnce(new Error("scan boom"));
+
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the debounced scan fire
+
+    const errorCalls = vi.mocked(ctx.ui.notify).mock.calls.filter(([, type]) => type === "error");
+    expect(errorCalls.length).toBeGreaterThan(0);
+    expect(String(errorCalls[0]![0])).toContain("background scan failed");
+    refreshSpy.mockRestore();
+
+    // Pi continues: message_end still records usage.
+    await fire(handlers, assistantMessageEndEvent("msg-5", { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 }), ctx);
+    expect(store.query(defaultFilters()).totals.requestCount).toBe(1);
+  });
+
+  it("RC5b: a collector failure never propagates into Pi", async () => {
+    const brokenStore = new ThrowingStore({ storeDir, sessionDir });
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store: brokenStore, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+
+    await expect(fire(handlers, assistantMessageEndEvent("msg-6", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }), ctx)).resolves.toBeUndefined();
+    expect(vi.mocked(ctx.ui.notify)).toHaveBeenCalledWith(expect.stringContaining("collect usage failed"), "error");
+  });
+
+  it("RC5c: an unavailable web server is reported non-fatally", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 }); // no factory registered
+    const handler = usageStatsCommand(commands);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const ctx = makeCtx({ mode: "print" });
+
+    try {
+      await handler("web", ctx);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("web dashboard module is not available"));
+      expect(ctx.ui.custom).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("RC5d: a failed server start is reported non-fatally and does not crash the command", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    const failing: WebServerHandle = {
+      start: vi.fn(async () => {
+        throw new Error("port in use");
+      }),
+      stop: vi.fn(async () => {}),
+      isRunning: () => false,
+      getUrl: () => undefined,
+    };
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => failing, openBrowser: vi.fn() });
+    const ctx = makeCtx({ mode: "print" });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      await usageStatsCommand(commands)("web", ctx);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("web failed"));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("port in use"));
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+});

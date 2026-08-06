@@ -179,11 +179,15 @@ export function resolveCostEstimate(
  * Apply the cost policy to a normalized record:
  *   valid recorded cost -> keep "recorded";
  *   otherwise estimate from the price table -> "estimated";
- *   unknown price -> "unavailable" (never a fabricated zero).
+ *   unknown price -> "unavailable" (never a fabricated zero);
+ *   no tokens at all -> stays "unavailable": a zero-token record has
+ *   nothing to estimate, and a fabricated $0 would misread missing usage
+ *   as free usage (spec: never treat missing cost as 0).
  * Returns a new record; the input is not mutated.
  */
 export function applyCostPolicy(record: UsageRecord, table: PricingTable = BUILTIN_PRICE_TABLE): UsageRecord {
   if (record.costKind === "recorded") return record;
+  if (record.totalTokens === 0) return record;
   const estimate = resolveCostEstimate(record.provider, record.model, record, table);
   if (estimate) {
     return { ...record, estimatedCost: estimate, costKind: "estimated" };

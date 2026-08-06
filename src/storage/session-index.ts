@@ -20,7 +20,7 @@
 import { join } from "node:path";
 import { SessionManager, getAgentDir, type SessionEntry, type SessionInfo } from "@earendil-works/pi-coding-agent";
 import type { UsageFilters, UsageQueryResult, UsageRecord, SessionContext } from "../domain";
-import { normalizeAssistantMessage, normalizeSummaryUsage } from "../domain";
+import { assistantMessageEntryId, normalizeAssistantMessage, normalizeSummaryUsage } from "../domain";
 import { RecordStore, STORE_SCHEMA_VERSION } from "./record-store";
 
 /** Directory name for the plugin's durable state under the agent dir. */
@@ -60,22 +60,32 @@ export type StoreDependencies = {
  */
 export function decodeSessionEntry(entry: SessionEntry, ctx: Omit<SessionContext, "entryId">): UsageRecord[] {
   if (!entry || typeof entry !== "object") return [];
-  const sessionCtx: SessionContext = { ...ctx, entryId: entry.id ?? "" };
-  if (!sessionCtx.entryId) return [];
   const timestampMs = readTimestampMs(entry.timestamp);
   switch (entry.type) {
     case "message": {
       // Prefer the message's own epoch-ms timestamp; fall back to the entry
       // timestamp (ISO, parsed above) so old entries keep their true time
       // instead of drifting to "now" on every rescan (SC2).
-      const record = normalizeAssistantMessage(withEntryTimestampFallback(entry.message, timestampMs), sessionCtx);
+      const message = withEntryTimestampFallback(entry.message, timestampMs);
+      // Same identity rule as the live message_end collector (responseId,
+      // else timestamp+content fingerprint) so a message recorded live and
+      // the same message read from a session file share one recordId (SC2,
+      // RC1). Identity is computed on the RAW message (before the timestamp
+      // backfill) and falls back to the entry id for legacy messages lacking
+      // both responseId and a real timestamp, keeping scans deterministic.
+      const record = normalizeAssistantMessage(message, {
+        ...ctx,
+        entryId: assistantMessageEntryId(entry.message, entry.id ?? ""),
+      });
       return record ? [record] : [];
     }
     case "compaction":
     case "branch_summary": {
+      const entryId = entry.id ?? "";
+      if (!entryId) return [];
       const usage = (entry as { usage?: unknown }).usage;
       if (usage === undefined || usage === null) return [];
-      const record = normalizeSummaryUsage(usage, { ...sessionCtx, timestampMs });
+      const record = normalizeSummaryUsage(usage, { ...ctx, entryId, timestampMs });
       return record ? [record] : [];
     }
     default:

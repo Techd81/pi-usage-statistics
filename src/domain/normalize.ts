@@ -50,6 +50,48 @@ const readString = (value: unknown): string => (typeof value === "string" ? valu
 const readTimestampMs = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) ? value : Date.now();
 
+/** FNV-1a 32-bit hash, hex-encoded — a deterministic content fingerprint. */
+const fnv1a = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+/**
+ * Stable entry identity for one finalized assistant message (design §7; SC2).
+ *
+ * The live `message_end` collector and the session scanner MUST derive the
+ * same identity so one message maps to exactly one `recordId` no matter which
+ * path recorded it first (RC1: repeated reconciliation never changes totals).
+ * Rule, in order:
+ * 1. the provider's `responseId` (stable across re-delivery);
+ * 2. `timestamp + content fingerprint` when the message carries a real
+ *    epoch-ms timestamp — the only ambiguous case is identical content at
+ *    the same millisecond;
+ * 3. `fallbackEntryId` (the session entry id on the scan side, `""` live)
+ *    for legacy messages lacking both fields, so scans stay deterministic
+ *    instead of drifting to "now" on every rescan.
+ */
+export function assistantMessageEntryId(message: unknown, fallbackEntryId: string): string {
+  if (isObject(message)) {
+    const responseId = message.responseId;
+    if (typeof responseId === "string" && responseId !== "") return responseId;
+    if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
+      let fingerprint = "";
+      try {
+        fingerprint = JSON.stringify(message.content ?? "");
+      } catch {
+        fingerprint = "";
+      }
+      return `msg:${message.timestamp}:${fnv1a(fingerprint)}`;
+    }
+  }
+  return fallbackEntryId;
+}
+
 /**
  * Validate a recorded Pi cost object. All five documented fields must be
  * present and finite non-negative. The provider-reported `total` is kept
