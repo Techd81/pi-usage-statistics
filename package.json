@@ -1,0 +1,32 @@
+{
+  "name": "pi-token-usage-statistics",
+  "version": "0.1.0",
+  "description": "Pi extension collecting token usage, cost, and cache-hit statistics across sessions, with a local web dashboard and TUI overlay.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "token-usage",
+    "statistics",
+    "cost",
+    "usage"
+  ],
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
