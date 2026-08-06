@@ -21,7 +21,8 @@ import { collectMessageEnd } from "./runtime/collector";
 import { presentText, runUsageStatsCommand } from "./runtime/commands";
 import { formatScanSummary } from "./runtime/format";
 import { DebouncedScanScheduler } from "./runtime/scan-scheduler";
-import { createWebServer, type WebServerHandle } from "./runtime/web-server";
+import { createUsageDashboardServer } from "./web/server";
+import type { WebServerHandle } from "./runtime/web-server";
 
 export const DEFAULT_SCAN_DEBOUNCE_MS = 1000;
 
@@ -30,7 +31,7 @@ export type UsageStatsExtensionOptions = {
   store?: UsageStore;
   /** Debounce window for the background scan. */
   scanDebounceMs?: number;
-  /** Server factory override (tests); defaults to the registered web-dashboard factory. */
+  /** Server factory override (tests); defaults to a dashboard server over the extension's own store. */
   createServer?: () => WebServerHandle | null;
   /** Browser-open override (tests); defaults to the OS command. */
   openBrowser?: (url: string) => void;
@@ -39,7 +40,7 @@ export type UsageStatsExtensionOptions = {
 export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStatsExtensionOptions = {}): void {
   const store: UsageStore = options.store ?? new UsageStore();
   const scanDebounceMs = options.scanDebounceMs ?? DEFAULT_SCAN_DEBOUNCE_MS;
-  const createServer = options.createServer ?? (() => createWebServer());
+  const createServer = options.createServer ?? (() => createUsageDashboardServer(store));
   const openBrowser = options.openBrowser ?? openInBrowser;
 
   let server: WebServerHandle | null = null;

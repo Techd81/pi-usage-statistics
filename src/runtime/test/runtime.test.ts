@@ -437,6 +437,38 @@ describe("/usage-stats command", () => {
       stdoutSpy.mockRestore();
     }
   });
+
+  it("RC6b: the default web server shares the extension's store, so live records are visible without a restart", async () => {
+    const store = await makeStore();
+    const { api, handlers, commands } = makeHarness();
+    const openBrowser = vi.fn();
+    // No createServer override: the default factory wires the extension's own
+    // store, so records collected via message_end are served immediately.
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, openBrowser });
+    const ctx = makeCtx();
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+    await fire(handlers, assistantMessageEndEvent("msg-live", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }), ctx);
+
+    const handler = usageStatsCommand(commands);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      await handler("web", ctx);
+      const output = stdoutSpy.mock.calls.map(([chunk]) => String(chunk)).join("");
+      const url = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+      expect(url).toBeTruthy();
+
+      const response = await fetch(`${url}/api/usage`);
+      expect(response.ok).toBe(true);
+      const body = (await response.json()) as { totals: { requestCount: number; inputTokens: number } };
+      // The live record is served immediately: the dashboard shares the store.
+      expect(body.totals.requestCount).toBe(1);
+      expect(body.totals.inputTokens).toBe(10);
+
+      await handler("stop", ctx);
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
 });
 
 // --- RC4 / RC5 ----------------------------------------------------------------
@@ -504,7 +536,7 @@ describe("lifecycle and error pathway", () => {
   it("RC5c: an unavailable web server is reported non-fatally", async () => {
     const store = await makeStore();
     const { api, commands } = makeHarness();
-    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 }); // no factory registered
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, createServer: () => null }); // dashboard module unavailable
     const handler = usageStatsCommand(commands);
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const ctx = makeCtx({ mode: "print" });

@@ -14,7 +14,7 @@
     "usage"
   ],
   "pi": {
-    "extensions": ["./src/extension.ts"]
+    "extensions": ["./src/extension.ts", "./src/web/register.ts"]
   },
   "scripts": {
     "test": "vitest run",
