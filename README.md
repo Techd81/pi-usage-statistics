@@ -23,19 +23,19 @@
 ### 通过本地路径
 
 ```bash
-pi packages add /path/to/pi-token-usage-statistics
+pi install /path/to/pi-token-usage-statistics
 ```
 
 ### 通过 npm / git
 
 ```bash
 # npm
-pi packages add pi-token-usage-statistics
+pi install npm:pi-token-usage-statistics
 # git
-pi packages add git+https://github.com/<you>/pi-token-usage-statistics.git
+pi install git:github.com/<you>/pi-token-usage-statistics
 ```
 
-重启 Pi 后生效（扩展在会话启动时初始化）。
+安装后重启 Pi 生效（扩展在会话启动时初始化）。用 `pi list` 查看已安装扩展，用 `pi config` 启用/禁用。
 
 ## 要求
 
