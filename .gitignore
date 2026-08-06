@@ -1,7 +1,13 @@
 /.agents
 /.cursor
 /.pi
-/.trellis
 node_modules/
 dist/
 coverage/
+
+# Trellis runtime caches (keep task/spec/workspace docs tracked)
+.trellis/.backup-*
+.trellis/worktrees/
+.trellis/.template-hashes.json
+.trellis/.runtime/
+.trellis/.cache/
