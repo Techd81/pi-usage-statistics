@@ -210,13 +210,26 @@ const trendPoint = (startMs: number, records: readonly UsageRecord[]): TrendPoin
  * Build the epoch-aligned trend. Every bucket start is a multiple of the
  * effective bucket width; empty buckets are emitted as zero points so the
  * time axis stays continuous. Time bounds are inclusive (DC6).
+ *
+ * When `fromMs <= 0` (「全部」), the trend window starts at the earliest
+ * filtered record (first token on this machine) — not Unix epoch. Sizing
+ * buckets against 1970→now collapses real history into a handful of identical
+ * mega-buckets and the chart reads as flat horizontal lines.
  */
 function buildTrend(records: readonly UsageRecord[], filters: UsageFilters): TrendPoint[] {
   // Inverted range: fromMs > toMs means no records qualify (matches() also rejects every record).
   if (filters.fromMs > filters.toMs) return [];
-  const bucketMs = effectiveBucketMs(filters.fromMs, filters.toMs, filters.bucketMs);
-  const lower = Number.isFinite(filters.fromMs) ? filters.fromMs : 0;
   const upper = Number.isFinite(filters.toMs) ? filters.toMs : Number.MAX_SAFE_INTEGER;
+  let lower = Number.isFinite(filters.fromMs) ? filters.fromMs : 0;
+  if (lower <= 0) {
+    if (records.length === 0) return [];
+    lower = records[0]!.timestampMs;
+    for (let i = 1; i < records.length; i++) {
+      const ts = records[i]!.timestampMs;
+      if (ts < lower) lower = ts;
+    }
+  }
+  const bucketMs = effectiveBucketMs(lower, upper, filters.bucketMs);
   const firstStart = Math.floor(lower / bucketMs) * bucketMs;
   const lastStart = Math.floor(upper / bucketMs) * bucketMs;
   if (lastStart < firstStart) return [];

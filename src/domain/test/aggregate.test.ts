@@ -168,6 +168,29 @@ describe("trend buckets (DC6)", () => {
     }
   });
 
+  it("全部 (fromMs<=0) starts at first token — not epoch mega-buckets", () => {
+    const first = BASE_TS;
+    const records = [
+      makeRecord({ timestampMs: first, inputTokens: 10, sourceEntryId: "e1" }),
+      makeRecord({ timestampMs: first + 60_000, inputTokens: 50, sourceEntryId: "e2" }),
+      makeRecord({ timestampMs: first + 120_000, inputTokens: 5, sourceEntryId: "e3" }),
+    ];
+    const result = queryUsage(
+      records,
+      filters({ fromMs: 0, toMs: first + 120_000, bucketMs: DEFAULT_BUCKET_MS }),
+      1,
+    );
+    const starts = result.trend.map((p) => p.startMs);
+    // Must not reach back toward Unix epoch (that scaled buckets to multi-day slabs).
+    expect(starts[0]!).toBeGreaterThanOrEqual(Math.floor(first / DEFAULT_BUCKET_MS) * DEFAULT_BUCKET_MS);
+    expect(starts[0]!).toBeLessThanOrEqual(first);
+    // Short real span → default 30s buckets, not a handful of identical mega-buckets.
+    expect(result.trend.length).toBeGreaterThan(2);
+    expect(result.trend.length).toBeLessThanOrEqual(10);
+    expect(result.trend.map((p) => p.inputTokens)).toContain(10);
+    expect(result.trend.map((p) => p.inputTokens)).toContain(50);
+  });
+
   it("returns an empty trend for an inverted range", () => {
     const result = queryUsage(
       [makeRecord({ timestampMs: BASE_TS, sourceEntryId: "e1" })],

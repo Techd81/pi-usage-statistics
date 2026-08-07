@@ -109,12 +109,22 @@ export function byModel(records) {
     .sort((a, b) => b.requestCount - a.requestCount || a.model.localeCompare(b.model));
 }
 
-/** 独立趋势桶：epoch 对齐，空桶补零，边界含入；超 MAX_TREND_BUCKETS 时按倍数放大桶宽（与插件防护一致）。 */
+/** 独立趋势桶：对齐到首个桶边界，空桶补零，边界含入；超 MAX_TREND_BUCKETS 时按倍数放大桶宽（与插件防护一致）。
+ * 「全部」（fromMs <= 0）时窗口从最早一条过滤记录开始（而非 Unix epoch），
+ * 与插件 buildTrend 同步——否则 1970→now 的巨型窗口会把真实历史压成少数 mega-bucket。 */
 export function trend(records, filters) {
   if (filters.fromMs > filters.toMs) return [];
-  const bucketMs = effectiveBucketMs(filters.fromMs, filters.toMs, filters.bucketMs);
-  const lower = Number.isFinite(filters.fromMs) ? filters.fromMs : 0;
   const upper = Number.isFinite(filters.toMs) ? filters.toMs : Number.MAX_SAFE_INTEGER;
+  let lower = Number.isFinite(filters.fromMs) ? filters.fromMs : 0;
+  if (lower <= 0) {
+    if (records.length === 0) return [];
+    lower = records[0].timestampMs;
+    for (let i = 1; i < records.length; i++) {
+      const ts = records[i].timestampMs;
+      if (ts < lower) lower = ts;
+    }
+  }
+  const bucketMs = effectiveBucketMs(lower, upper, filters.bucketMs);
   const firstStart = Math.floor(lower / bucketMs) * bucketMs;
   const lastStart = Math.floor(upper / bucketMs) * bucketMs;
   if (lastStart < firstStart) return [];
