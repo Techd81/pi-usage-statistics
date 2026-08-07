@@ -46,6 +46,7 @@
   | `Esc` | 返回（模型表 → 主视图）或关闭 |
 
 - **Multi-series trends** — 同屏叠加 Cost / Cache write / Cache read / Input / Output 五条序列
+- **Live updates / 实时刷新** — 仪表盘打开期间自动订阅 `message_end`，新回复产生后防抖刷新（约 300ms），数字与趋势实时跟上会话
 - **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算（标记 `~` / estimated）；无价格时显示 `--`
 
 ## Requirements / 环境要求
@@ -110,7 +111,8 @@ pi install npm:pi-token-usage-statistics
 1. 打开后默认看到 **总览 + 趋势图**（如 `images/image1.png`）
 2. 按 `m` 进入 **按模型统计表**（如 `images/image2.png`）：Model / Requests / Tokens / Total cost / Avg cost
 3. 按 `t` 切换时间窗；按 `p` / `g` 切换项目 / 全局
-4. 按 `Esc` 退出（在模型表时先回到主视图）
+4. **实时刷新**：会话继续产生新回复时，界面自动更新（约 300ms 防抖），无需按键
+5. 按 `Esc` 退出（在模型表时先回到主视图）
 
 ## Data & Privacy / 数据与隐私
 
