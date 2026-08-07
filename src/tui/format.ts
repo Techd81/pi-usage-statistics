@@ -48,10 +48,12 @@ export function formatCompactTokens(value: number): string {
 
 /**
  * Chinese compact magnitude for the Total tokens hint:
- * ≥ 1亿 → `x.xx亿`; otherwise → `x.xx万` (including values under 1万).
+ * 0 → `0`（0 个 token 不是 0 万）；
+ * ≥ 1亿 → `x.xx亿`；otherwise → `x.xx万` (including values under 1万).
  */
 export function formatTokensZhCompact(value: number): string {
   const n = Number.isFinite(value) && value > 0 ? value : 0;
+  if (n === 0) return "0";
   const trim = (x: number): string => {
     const s = x.toFixed(2);
     return s.replace(/\.?0+$/, "");

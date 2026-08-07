@@ -84,12 +84,13 @@ describe("formatTokensZhCompact", () => {
     expect(formatTokensZhCompact(100_000_000)).toBe("1亿");
     expect(formatTokensZhCompact(250_000_000)).toBe("2.5亿");
     expect(formatTokensZhCompact(12_500)).toBe("1.25万");
-    expect(formatTokensZhCompact(0)).toBe("0万");
+    expect(formatTokensZhCompact(0)).toBe("0");
   });
 
-  it("collapses non-finite and negative inputs to 0万", () => {
-    expect(formatTokensZhCompact(Number.NaN)).toBe("0万");
-    expect(formatTokensZhCompact(-5)).toBe("0万");
+  it("collapses non-finite and negative inputs to 0", () => {
+    expect(formatTokensZhCompact(Number.NaN)).toBe("0");
+    expect(formatTokensZhCompact(-5)).toBe("0");
+    expect(formatTokensZhCompact(Number.POSITIVE_INFINITY)).toBe("0");
   });
 });
 

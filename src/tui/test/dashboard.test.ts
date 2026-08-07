@@ -128,7 +128,7 @@ describe("UsageDashboardComponent.render", () => {
     // Status line keys match real bindings (no [s], has [m]).
     expect(text).toContain("范围: 全局");
     expect(text).toContain("时间: 当天");
-    expect(text).toContain("[p]项目 [g]全局 [m] models [t]时间 [ESC]back");
+    expect(text).toContain("[p]项目 [g]全局 [m]模型 [t]时间 [ESC]back");
     expect(text).not.toContain("[q]");
     expect(text).not.toContain("[s]");
     for (const line of lines) {

@@ -571,7 +571,8 @@ export class UsageDashboardComponent {
     const time = timeRangeLabel(this.timeRange);
     // 项目视图显示具体路径，用户可确认过滤范围（R2）；空 projectCwd 回退旧文案。
     const scopeDetail = this.scope === "project" && this.deps.projectCwd !== "" ? ` (${this.deps.projectCwd})` : "";
-    return `范围: ${scope}${scopeDetail} · 时间: ${time} · [p]项目 [g]全局 [m] models [t]时间 [ESC]back`;
+    // [m]模型（2 列）而非 models（6 列）：80 列窄终端下含项目路径仍能完整显示提示行。
+    return `范围: ${scope}${scopeDetail} · 时间: ${time} · [p]项目 [g]全局 [m]模型 [t]时间 [ESC]back`;
   }
 }
 
