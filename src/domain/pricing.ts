@@ -186,7 +186,21 @@ export function resolveCostEstimate(
  * Returns a new record; the input is not mutated.
  */
 export function applyCostPolicy(record: UsageRecord, table: PricingTable = BUILTIN_PRICE_TABLE): UsageRecord {
-  if (record.costKind === "recorded") return record;
+  if (record.costKind === "recorded") {
+    // Pi writes an all-zero `cost` object (five fields present, total = 0)
+    // for models it has no price for. Such a placeholder must not be treated
+    // as authoritative recorded spend — otherwise the local price override
+    // file could never take effect. When the record actually has token usage
+    // and the price table yields a non-zero estimate, fall back to
+    // "estimated" (DC1: a zero price is never fabricated for missing data).
+    if (record.recordedCost?.total === 0 && record.totalTokens > 0) {
+      const estimate = resolveCostEstimate(record.provider, record.model, record, table);
+      if (estimate && estimate.total > 0) {
+        return { ...record, estimatedCost: estimate, costKind: "estimated" };
+      }
+    }
+    return record;
+  }
   if (record.totalTokens === 0) return record;
   const estimate = resolveCostEstimate(record.provider, record.model, record, table);
   if (estimate) {
