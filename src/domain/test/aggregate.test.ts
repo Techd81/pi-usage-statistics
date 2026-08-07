@@ -4,6 +4,8 @@ import {
   MAX_TREND_BUCKETS,
   cacheHitRate,
   costDisplay,
+  normalizePath,
+  pathsMatch,
   queryUsage,
   validateFilters,
 } from "../aggregate";
@@ -363,5 +365,47 @@ describe("per-model aggregates (byModel)", () => {
     expect(byName["summary-only"]!.requestCount).toBe(0);
     expect(byName["summary-only"]!.cost.amount).toBe(9);
     expect(byName["summary-only"]!.avgCost).toEqual({ amount: null, status: "unavailable", currency: "USD" });
+  });
+});
+
+describe("pathsMatch / normalizePath (D3 路径归一化)", () => {
+  it("归一化：反斜杠/正斜杠/大小写/尾斜杠收敛到同一形式", () => {
+    expect(normalizePath("D:\\pi-usage-statistics")).toBe("d:/pi-usage-statistics");
+    expect(normalizePath("D:/pi-usage-statistics")).toBe("d:/pi-usage-statistics");
+    expect(normalizePath("d:\\PI-USAGE-STATISTICS\\")).toBe("d:/pi-usage-statistics");
+    expect(normalizePath("D:/pi-usage-statistics/")).toBe("d:/pi-usage-statistics");
+    expect(normalizePath("D:\\")).toBe("d:");
+    expect(normalizePath("")).toBe("");
+  });
+
+  it("变体互相匹配，不同路径不误配", () => {
+    expect(pathsMatch("D:\\pi-usage-statistics", "D:/pi-usage-statistics")).toBe(true);
+    expect(pathsMatch("D:\\pi-usage-statistics", "d:\\pi-usage-statistics\\")).toBe(true);
+    expect(pathsMatch("D:\\pi-usage-statistics", "D:\\pi-usage-statistics\\src")).toBe(false);
+    expect(pathsMatch("D:\\pi-usage-statistics", "")).toBe(false);
+    expect(pathsMatch("", "")).toBe(true);
+  });
+
+  it("project 过滤对路径变体不敏感（AC3）", () => {
+    const record = makeRecord({ projectCwd: "D:\\pi-usage-statistics", inputTokens: 10, timestampMs: BASE_TS });
+    const cases: string[][] = [
+      ["D:\\pi-usage-statistics"],
+      ["D:/pi-usage-statistics"],
+      ["d:\\PI-USAGE-STATISTICS\\"],
+      ["D:/pi-usage-statistics/"],
+    ];
+    for (const projects of cases) {
+      const result = queryUsage([record], filters({ projects }), 1);
+      expect(result.totals.totalTokens, `projects=${JSON.stringify(projects)}`).toBe(10);
+      expect(result.totals.requestCount).toBe(1);
+    }
+  });
+
+  it("project 过滤匹配根目录 D:\\ 变体", () => {
+    const record = makeRecord({ projectCwd: "D:\\", inputTokens: 5, timestampMs: BASE_TS });
+    for (const projects of [["D:\\"], ["D:/"], ["d:"]]) {
+      const result = queryUsage([record], filters({ projects }), 1);
+      expect(result.totals.totalTokens, `projects=${JSON.stringify(projects)}`).toBe(5);
+    }
   });
 });

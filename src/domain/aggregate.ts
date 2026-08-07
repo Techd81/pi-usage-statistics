@@ -57,12 +57,29 @@ export function validateFilters(value: unknown): UsageFilters | null {
   return { providers, models, projects, sessions, fromMs, toMs, bucketMs, includeSummaryUsage };
 }
 
+/**
+ * 归一化路径：正反斜杠统一 + 小写 + 去尾斜杠；空串保持空。
+ *
+ * 仅用于过滤比较，不修改存储数据。权衡：toLowerCase 在大小写敏感文件系统
+ * （Linux/macOS）上可能合并两个仅大小写不同的目录——本项目以 Windows 为主，
+ * 且归一化只影响比较不影响数据，接受此取舍（D3）。
+ */
+export function normalizePath(p: string): string {
+  const s = p.replace(/\\/g, "/").toLowerCase();
+  return s.length > 1 ? s.replace(/\/+$/, "") : s;
+}
+
+/** 项目路径匹配：归一化后相等（大小写 / 斜杠 / 尾斜杠不敏感）。 */
+export function pathsMatch(a: string, b: string): boolean {
+  return normalizePath(a) === normalizePath(b);
+}
+
 const matches = (record: UsageRecord, filters: UsageFilters): boolean => {
   if (record.sourceKind === "summary" && !filters.includeSummaryUsage) return false;
   if (record.timestampMs < filters.fromMs || record.timestampMs > filters.toMs) return false;
   if ((filters.providers?.length ?? 0) > 0 && !filters.providers!.includes(record.provider)) return false;
   if ((filters.models?.length ?? 0) > 0 && !filters.models!.includes(record.model)) return false;
-  if ((filters.projects?.length ?? 0) > 0 && !filters.projects!.includes(record.projectCwd)) return false;
+  if ((filters.projects?.length ?? 0) > 0 && !filters.projects!.some((p) => pathsMatch(p, record.projectCwd))) return false;
   if ((filters.sessions?.length ?? 0) > 0 && !filters.sessions!.includes(record.sessionId)) return false;
   return true;
 };
