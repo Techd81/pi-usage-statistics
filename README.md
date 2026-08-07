@@ -47,7 +47,7 @@
 
 - **Multi-series trends** — 同屏叠加 Cost / Cache write / Cache read / Input / Output 五条序列
 - **Live updates / 实时刷新** — 仪表盘打开期间双通道自动更新：成功的 `message_end` 先立即更新当前窗口内存，并异步持久化到共享 `records.jsonl`（连续消息会合并写入），本会话约 300ms 防抖刷新；**多窗口场景**每 2s 检测共享文件变化，其他仍在运行的 Pi 窗口产生的数据自动重载上屏，无需退出、重启或重新执行命令
-- **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算（标记 `~` / estimated）；无价格时显示 `--`
+- **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算；无价格时显示 `--`（面板上不再标注 `~` / estimated 后缀，估算状态暂不出现在 TUI）
 
 ## Requirements / 环境要求
 
@@ -125,8 +125,8 @@ pi install npm:pi-token-usage-statistics
 
 成本优先级：
 
-1. **Recorded** — Pi 自带的 `cost` 字段（校验通过后直接使用）
-2. **Estimated** — 内置价表或本地覆盖价表估算；显示为 `~$x.xxxx (estimated)`
+1. **Recorded** — Pi 自带的 `cost` 字段（校验通过后直接使用；全零占位视为非权威，价表可估算时回退为 Estimated）
+2. **Estimated** — 内置价表或本地覆盖价表估算；面板显示为 `$x.xxxx`（不再带 `~` / `(estimated)` 后缀）
 3. **Unavailable** — 无价格时为 `--`；token 统计不受影响
 
 ### 价格覆盖文件
