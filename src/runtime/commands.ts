@@ -138,6 +138,9 @@ export async function runUsageStatsCommand(
  */
 async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext, scope: Scope): Promise<void> {
   try {
+    // Multi-window: reload the durable file first so the freshly opened
+    // dashboard already includes records written by other pi processes.
+    await deps.store.reloadFromDisk();
     const { makeOverlayFactory } = await import("../tui/dashboard");
     const cwd = projectCwd(ctx);
     const overlayDeps: OverlayDeps = { store: deps.store, projectCwd: cwd, initialScope: scope };

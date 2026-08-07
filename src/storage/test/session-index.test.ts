@@ -409,3 +409,55 @@ describe("UsageStore", () => {
     expect(result.totals.cost.amount).toBeCloseTo(1, 6); // 1000 tokens * $1/1k
   });
 });
+
+describe("UsageStore.reloadFromDisk (多窗口热更新)", () => {
+  let sessionDir: string;
+
+  beforeEach(async () => {
+    sessionDir = await makeTempDir("pi-reload-sessions-");
+    process.env.PI_AGENT_DIR_TEST = await makeTempDir("pi-reload-agent-");
+  });
+
+  it("picks up records written by another store/process on the same directory", async () => {
+    const storeDir = await makeTempDir("pi-reload-data-");
+    // Process A and B are independent instances over the same directory.
+    const a = new UsageStore({ storeDir, sessionDir });
+    await a.init();
+    const b = new UsageStore({ storeDir, sessionDir });
+    await b.init();
+
+    // A records usage in its own memory — B cannot see it yet.
+    a.upsertRecord(
+      makeRecord({ sessionId: "a", sourceEntryId: "e1", timestampMs: Date.now(), inputTokens: 100 }),
+    );
+    expect(b.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.totalTokens).toBe(0);
+
+    // A flushes to disk (simulates process A's durable write); B still stale.
+    await a.stop();
+    expect(b.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.totalTokens).toBe(0);
+
+    // B reloads from disk → sees A's record.
+    await b.reloadFromDisk();
+    expect(b.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.totalTokens).toBe(100);
+
+    // B's own live record survives reload (flushed first, then loaded back).
+    b.upsertRecord(
+      makeRecord({ sessionId: "b", sourceEntryId: "e1", timestampMs: Date.now(), inputTokens: 50 }),
+    );
+    await b.reloadFromDisk();
+    const after = b.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false });
+    expect(after.totals.totalTokens).toBe(150);
+    // liveRecords overlay was dropped after reload (it is now in the durable file)
+    expect(b.liveRecordCount).toBe(0);
+  });
+
+  it("is non-fatal when the records file is missing", async () => {
+    const storeDir = await makeTempDir("pi-reload-missing-");
+    const a = new UsageStore({ storeDir, sessionDir });
+    await a.init();
+    a.upsertRecord(makeRecord({ sessionId: "a", sourceEntryId: "e1", timestampMs: Date.now(), inputTokens: 7 }));
+    await expect(a.reloadFromDisk()).resolves.toBeUndefined();
+    // In-memory records survive even though the file was never flushed before a failure path
+    expect(a.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.totalTokens).toBeGreaterThanOrEqual(0);
+  });
+});

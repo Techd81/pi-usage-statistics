@@ -194,6 +194,16 @@ export class UsageStore {
     return this.priceTable;
   }
 
+  /** Path of the durable records file (disk-polling / tests). */
+  get recordsFilePath(): string {
+    return this.store.recordsFilePath;
+  }
+
+  /** Number of live (message_end) records not yet reconciled by a scan (diagnostics/tests). */
+  get liveRecordCount(): number {
+    return this.liveRecords.size;
+  }
+
   query(filters: UsageFilters, refreshedAtMs?: number): UsageQueryResult {
     return this.store.query(filters, refreshedAtMs);
   }
@@ -261,6 +271,27 @@ export class UsageStore {
     // follow-up rebuild before resolving.
     while (this.inflight) await this.inflight;
     await this.store.flush();
+  }
+
+  /**
+   * Reload all records from disk, picking up writes from other pi processes
+   * (multi-window use): flush this process's pending memory first so no live
+   * record is lost, then load the merged file, then drop the live overlay map
+   * (its records are now part of the durable file). Failures are non-fatal:
+   * on error the in-memory state is kept as-is.
+   */
+  async reloadFromDisk(): Promise<void> {
+    try {
+      // Flush only when this process has pending writes (dirty). Skipping a
+      // clean flush avoids rewriting the file, which would otherwise look
+      // like an external change to the poller and self-trigger reloads.
+      if (this.store.isDirty) await this.store.flush();
+      await this.store.load();
+      this.liveRecords.clear();
+      this.scannedOnce = true;
+    } catch {
+      // Non-fatal: keep whatever in-memory state we have.
+    }
   }
 
   private async runScan(rebuilt: boolean, progress?: (done: number, total: number) => void): Promise<ScanSummary> {

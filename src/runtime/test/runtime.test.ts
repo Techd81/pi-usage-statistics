@@ -27,6 +27,7 @@ import type { UsageFilters } from "../../domain";
 import { DEFAULT_BUCKET_MS } from "../../domain";
 import usageStatsExtension from "../../extension";
 import { UsageStore } from "../../storage";
+import { makeRecord } from "../../storage/test/helpers";
 import { LIVE_REFRESH_DEBOUNCE_MS, UsageDashboardComponent } from "../../tui/dashboard";
 
 // --- Mock the Pi runtime module (isolation for store dir + scanner) --------
@@ -468,6 +469,40 @@ describe("/pi-usage-statistics command", () => {
     vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
     expect(requestRender).not.toHaveBeenCalled();
     vi.useRealTimers();
+    component!.dispose();
+  });
+
+  it("TC8: records written by ANOTHER store/process reach an open dashboard via disk polling", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    // Short poll interval so the test runs on real timers/fs end-to-end.
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000, externalPoll: { intervalMs: 100 } });
+    const handler = usageStatsCommand(commands);
+    const ctx = makeCtx({ mode: "tui" });
+
+    // Open the dashboard (default today scope — events use fixed 1.7e12 ts, so cycle to 全部).
+    let component: UsageDashboardComponent | undefined;
+    (ctx.ui as { custom: unknown }).custom = vi.fn(async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: null) => void) => UsageDashboardComponent) => {
+      component = factory({ requestRender: () => {} }, null, {}, () => {});
+    });
+    await handler("", ctx);
+    expect(component).toBeDefined();
+    for (let i = 0; i < 6; i++) component!.handleInput("t");
+
+    // Another process (separate UsageStore over the same directory) writes + flushes.
+    const other = new UsageStore({ storeDir, sessionDir });
+    await other.init();
+    other.upsertRecord(
+      makeRecord({ sessionId: "other-proc", sourceEntryId: "e1", timestampMs: 1_700_000_000_000, inputTokens: 222 }),
+    );
+    await other.stop(); // flushes to the shared records.jsonl
+
+    // Before polling catches it, the dashboard does not show the external record.
+    expect(component!.render(80).join("\n")).not.toContain("222");
+    // Poll interval fires → reloadFromDisk → notify → debounced refresh.
+    // intervalMs clamps to 250ms; allow 2 ticks + the 300ms dashboard debounce.
+    await new Promise((resolve) => setTimeout(resolve, 250 + LIVE_REFRESH_DEBOUNCE_MS + 300));
+    expect(component!.render(80).join("\n")).toContain("222");
     component!.dispose();
   });
 

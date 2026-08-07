@@ -21,6 +21,7 @@ import type { UsageRecord } from "./domain";
 import { UsageStore } from "./storage";
 import { collectMessageEnd } from "./runtime/collector";
 import { runUsageStatsCommand } from "./runtime/commands";
+import { ExternalDataPoller, type ExternalPollerOptions } from "./runtime/external-poller";
 import { DebouncedScanScheduler } from "./runtime/scan-scheduler";
 
 export const DEFAULT_SCAN_DEBOUNCE_MS = 1000;
@@ -30,6 +31,8 @@ export type UsageStatsExtensionOptions = {
   store?: UsageStore;
   /** Debounce window for the background scan. */
   scanDebounceMs?: number;
+  /** Multi-window disk-polling knobs (tests may shrink the interval / fake the reader). */
+  externalPoll?: ExternalPollerOptions;
 };
 
 export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStatsExtensionOptions = {}): void {
@@ -44,10 +47,17 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
    * one broken subscriber can never break collection or Pi.
    */
   const liveListeners = new Set<() => void>();
+  /**
+   * Multi-window hot updates: while at least one dashboard is open, poll the
+   * records file for writes from OTHER pi processes and reload the store.
+   */
+  const externalPoller = new ExternalDataPoller(store, () => notifyLiveListeners(), options.externalPoll);
   const subscribeLive = (listener: () => void): (() => void) => {
     liveListeners.add(listener);
+    void externalPoller.ensureRunning(); // first subscriber starts disk polling
     return () => {
       liveListeners.delete(listener);
+      if (liveListeners.size === 0) externalPoller.stop(); // last one stops it
     };
   };
 
@@ -112,6 +122,7 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
     // Stop runtime resources first; each failure is isolated so a broken
     // step can never block the pending-write flush (RC4).
     try {
+      externalPoller.stop();
       await scheduler.settle(); // cancel pending pass + wait for in-flight scan
     } catch (error) {
       notifyError(ctx, "shutdown (scan)", error);
