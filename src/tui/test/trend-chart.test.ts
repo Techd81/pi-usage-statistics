@@ -4,8 +4,8 @@
  */
 import { describe, expect, it } from "vitest";
 import type { TrendPoint } from "../../domain";
-import { displayWidth } from "../format";
-import { renderTrendChart, TREND_CHART_SERIES } from "../trend-chart";
+import { displayWidth, formatDateTimeCompact } from "../format";
+import { renderTrendChart, TREND_CHART_SERIES, trimTrendEmptyEdges } from "../trend-chart";
 
 const point = (partial: Partial<TrendPoint> & { startMs: number }): TrendPoint => ({
   startMs: partial.startMs,
@@ -71,11 +71,10 @@ describe("renderTrendChart", () => {
     // Skip legend / units cue; first plot row is the top of the dual-Y grid.
     const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
     const topPlot = lines[unitsIdx + 1] ?? "";
-    expect(topPlot).toMatch(/[·:]/);
+    expect(topPlot).toMatch(/·/);
   });
 
-  it("connects adjacent samples with continuous ink (not only isolated scatter)", () => {
-    // Steep rise: Bresenham fills intermediate rows between samples.
+  it("scatters sample glyphs only — no connecting line ink", () => {
     const trend = [
       point({ startMs: 1, inputTokens: 1, totalTokens: 1 }),
       point({ startMs: 2, inputTokens: 100, totalTokens: 100 }),
@@ -84,15 +83,11 @@ describe("renderTrendChart", () => {
     const lines = renderTrendChart(trend, { width: 40, height: 8, colorize: false });
     const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
     const plot = lines.slice(unitsIdx + 1, unitsIdx + 1 + 8).join("");
-    const ink = (plot.match(/[o*+x·]/g) ?? []).length;
-    // Continuous segments paint more than one cell per series endpoint.
-    expect(ink).toBeGreaterThan(6);
+    expect(plot).not.toMatch(/[─│╱╲]/);
+    expect((plot.match(/o/g) ?? []).length).toBeGreaterThan(0);
   });
 
-  it("dashed cost series still paints every sample column (including the last)", () => {
-    // Flat cost + plotW=2: a 1-wide Bresenham segment would skip the odd
-    // endpoint if dashed painting omitted atEnd. Legend at width 2 truncates
-    // before the · glyph, so plot-body dots are unambiguous.
+  it("paints cost glyphs at every positive sample column (including the last)", () => {
     const trend = [
       point({ startMs: 1, cost: { amount: 0.1, status: "recorded", currency: "USD" } }),
       point({ startMs: 2, cost: { amount: 0.1, status: "recorded", currency: "USD" } }),
@@ -103,11 +98,140 @@ describe("renderTrendChart", () => {
     expect(dots).toBeGreaterThanOrEqual(2);
   });
 
+  it("paints zero-value samples on the baseline for every series (incl. Cache write)", () => {
+    const trend = [
+      point({
+        startMs: 1,
+        cacheReadTokens: 1000,
+        outputTokens: 100,
+        cacheWriteTokens: 0,
+        cost: { amount: 0.1, status: "recorded", currency: "USD" },
+      }),
+      point({
+        startMs: 2,
+        cacheReadTokens: 2000,
+        outputTokens: 200,
+        cacheWriteTokens: 0,
+        cost: { amount: 0.2, status: "recorded", currency: "USD" },
+      }),
+    ];
+    const height = 8;
+    const lines = renderTrendChart(trend, { width: 72, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plotRows = lines.slice(unitsIdx + 1, unitsIdx + 1 + height);
+    const bottom = plotRows[height - 1] ?? "";
+    // Cache write is all-zero — must still ink the baseline (not silently omitted).
+    expect(bottom.includes("+")).toBe(true);
+    expect(plotRows.join("").includes("x")).toBe(true);
+  });
+
+  it("keeps Input/Output zeros visible on the baseline (not buried under Cost ·)", () => {
+    const trend = [
+      point({
+        startMs: 1,
+        cacheReadTokens: 5_000_000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cost: { amount: 0, status: "recorded", currency: "USD" },
+      }),
+      point({
+        startMs: 2,
+        cacheReadTokens: 6_000_000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cost: { amount: 0, status: "recorded", currency: "USD" },
+      }),
+    ];
+    const height = 8;
+    const lines = renderTrendChart(trend, { width: 60, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const bottom = lines[unitsIdx + height] ?? "";
+    // Neighbor-spill keeps multiple zero series visible on the baseline.
+    expect(bottom).toContain("+");
+    expect(bottom).toContain("o");
+    expect(bottom).toContain("x");
+    expect(bottom).toContain("·");
+  });
+
+  it("draws a ─ time baseline between the plot body and date ticks", () => {
+    const lines = renderTrendChart(sampleTrend(), { width: 80, height: 6, colorize: false });
+    const axisIdx = lines.length - 1;
+    const baseline = lines[axisIdx - 1] ?? "";
+    expect(baseline).toMatch(/─{4,}/);
+    expect(baseline).not.toMatch(/[o*+x·]/);
+  });
+
+  it("does not let zero markers erase non-zero peaks", () => {
+    const trend = [
+      point({ startMs: 1, outputTokens: 100, cost: { amount: 0, status: "recorded", currency: "USD" } }),
+      point({ startMs: 2, outputTokens: 0, cost: { amount: 0, status: "recorded", currency: "USD" } }),
+      point({ startMs: 3, outputTokens: 80, cost: { amount: 0.4, status: "recorded", currency: "USD" } }),
+    ];
+    const height = 6;
+    const lines = renderTrendChart(trend, { width: 40, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const above = lines.slice(unitsIdx + 1, unitsIdx + height).join("");
+    expect(above.includes("x")).toBe(true);
+  });
+
   it("uses a taller default plot height on wide terminals", () => {
     const narrow = renderTrendChart(sampleTrend(), { width: 30, colorize: false });
     const wide = renderTrendChart(sampleTrend(), { width: 100, colorize: false });
     // Wide plot body (excluding legend/units/axis) should be taller.
     expect(wide.length).toBeGreaterThan(narrow.length);
+  });
+
+  it("keeps Output above the baseline when Cache read dominates by 100×+", () => {
+    // Reproduces the real-world crush: cache-read peaks crush linear Output to y=0.
+    const trend = [
+      point({
+        startMs: 1,
+        cacheReadTokens: 8_000_000,
+        outputTokens: 30_000,
+        inputTokens: 140_000,
+        totalTokens: 8_170_000,
+        cost: { amount: 1.2, status: "recorded", currency: "USD" },
+      }),
+      point({
+        startMs: 2,
+        cacheReadTokens: 6_000_000,
+        outputTokens: 50_000,
+        inputTokens: 200_000,
+        totalTokens: 6_250_000,
+        cost: { amount: 2.0, status: "recorded", currency: "USD" },
+      }),
+      point({
+        startMs: 3,
+        cacheReadTokens: 7_500_000,
+        outputTokens: 40_000,
+        inputTokens: 160_000,
+        totalTokens: 7_700_000,
+        cost: { amount: 1.5, status: "recorded", currency: "USD" },
+      }),
+    ];
+    const height = 11;
+    const lines = renderTrendChart(trend, { width: 80, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plotRows = lines.slice(unitsIdx + 1, unitsIdx + 1 + height);
+    const bottom = plotRows[height - 1] ?? "";
+    const above = plotRows.slice(0, height - 1).join("");
+    // Output ink must appear above the baseline — not only on y=0.
+    expect(above.includes("x")).toBe(true);
+    // And not exclusively stuck on the bottom row.
+    const bottomX = (bottom.match(/x/g) ?? []).length;
+    const aboveX = (above.match(/x/g) ?? []).length;
+    expect(aboveX).toBeGreaterThan(bottomX);
+  });
+
+  it("shows mid Y-axis ticks on tall plots", () => {
+    const lines = renderTrendChart(sampleTrend(), { width: 100, height: 11, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plotRows = lines.slice(unitsIdx + 1, unitsIdx + 1 + 11);
+    // Mid row should carry a compact token label (not only top/bottom).
+    const mid = plotRows[Math.floor(10 / 2)] ?? "";
+    expect(mid.trimStart().match(/^\d/)).toBeTruthy();
   });
 
   it("handles empty trend without throwing", () => {
@@ -137,7 +261,165 @@ describe("renderTrendChart", () => {
     const lines = renderTrendChart(trend, { width: 100, colorize: false });
     const text = lines.join("\n");
     // Local-time compact labels from first/last bucket.
-    expect(text).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(text).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+  });
+
+  it("forces axisToMs on the right tick and supports open-start ~", () => {
+    const trend = sampleTrend();
+    const axisTo = new Date(2026, 7, 7, 17, 17, 0).getTime();
+    const lines = renderTrendChart(trend, {
+      width: 100,
+      colorize: false,
+      openStart: true,
+      axisToMs: axisTo,
+    });
+    const axis = lines[lines.length - 1] ?? "";
+    expect(axis).toContain("~");
+    expect(axis).toContain("2026-08-07 17:17");
+  });
+
+  it("does not lose the active tail when the window is mostly leading zeros (30d/1y bug)", () => {
+    // Mostly empty prefix + real activity only at the end — stride sampling
+    // used to pick almost only zeros and hide the tail.
+    const trend = [
+      ...Array.from({ length: 900 }, (_, i) => point({ startMs: i })),
+      ...Array.from({ length: 100 }, (_, i) =>
+        point({
+          startMs: 900 + i,
+          cacheReadTokens: 2_000_000,
+          inputTokens: 50_000,
+          outputTokens: 10_000,
+          cost: { amount: 1.5, status: "recorded", currency: "USD" },
+        }),
+      ),
+    ];
+    const height = 10;
+    const lines = renderTrendChart(trend, { width: 80, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const above = lines.slice(unitsIdx + 1, unitsIdx + height).join("");
+    // Peaks from the active tail must appear above the baseline.
+    expect(above).toMatch(/[o*x]/);
+  });
+
+  it("sparsePaint (全部): no solid horizontal bars on a flat dense series", () => {
+    const trend = Array.from({ length: 200 }, (_, i) =>
+      point({
+        startMs: 1_700_000_000_000 + i * 3_600_000,
+        cacheReadTokens: 5_000_000,
+        outputTokens: 20_000,
+        inputTokens: 50_000,
+        cost: { amount: 0.5, status: "recorded", currency: "USD" },
+      }),
+    );
+    const height = 10;
+    const lines = renderTrendChart(trend, {
+      width: 80,
+      height,
+      colorize: false,
+      sparsePaint: true,
+    });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plot = lines.slice(unitsIdx + 1, unitsIdx + 1 + height).join("");
+    expect(plot.match(/\*{6,}/g) ?? []).toHaveLength(0);
+    expect(plot).toContain("*");
+  });
+
+  it("sparsePaint still paints every zero on the baseline (Cache write=0)", () => {
+    const trend = Array.from({ length: 80 }, (_, i) =>
+      point({
+        startMs: 1_700_000_000_000 + i * 3_600_000,
+        cacheReadTokens: 1_000_000,
+        cacheWriteTokens: 0,
+        inputTokens: 10_000,
+        outputTokens: 1_000,
+        cost: { amount: 0.2, status: "recorded", currency: "USD" },
+      }),
+    );
+    const height = 8;
+    const lines = renderTrendChart(trend, {
+      width: 72,
+      height,
+      colorize: false,
+      sparsePaint: true,
+    });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const baseline = lines[unitsIdx + height] ?? "";
+    // Zeros are not sparsified — baseline must carry dense Cache-write `+`.
+    expect(baseline).toMatch(/\+{5,}/);
+  });
+
+  it("bounded ranges paint every column (sparsePaint off — 1d/7d must stay dense)", () => {
+    const trend = Array.from({ length: 40 }, (_, i) =>
+      point({
+        startMs: 1_700_000_000_000 + i * 3_600_000,
+        cacheReadTokens: 5_000_000,
+        outputTokens: 20_000,
+        inputTokens: 50_000,
+        cost: { amount: 0.5, status: "recorded", currency: "USD" },
+      }),
+    );
+    const height = 8;
+    const lines = renderTrendChart(trend, { width: 60, height, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plot = lines.slice(unitsIdx + 1, unitsIdx + 1 + height).join("");
+    // Without sparsePaint, flat column-max ink forms a continuous peak run.
+    expect(plot).toMatch(/\*{6,}/);
+  });
+
+  it("keeps filter-window zeros on the left — idle days render as 0, not cropped", () => {
+    const day = 86_400_000;
+    const windowStart = Date.UTC(2026, 6, 8, 9, 0); // 07-08 — no install yet = 0
+    const firstData = windowStart + 12 * day;
+    const toMs = windowStart + 30 * day;
+    const trend = [
+      point({ startMs: windowStart }),
+      point({ startMs: windowStart + day }),
+      point({ startMs: windowStart + 2 * day }),
+      point({
+        startMs: firstData,
+        cacheReadTokens: 1_000_000,
+        outputTokens: 10_000,
+        inputTokens: 20_000,
+        cost: { amount: 0.5, status: "recorded", currency: "USD" },
+      }),
+      point({
+        startMs: firstData + day,
+        cacheReadTokens: 1_200_000,
+        outputTokens: 12_000,
+        inputTokens: 22_000,
+        cost: { amount: 0.6, status: "recorded", currency: "USD" },
+      }),
+    ];
+    const height = 8;
+    const lines = renderTrendChart(trend, {
+      width: 72,
+      height,
+      colorize: false,
+      axisFromMs: windowStart,
+      axisToMs: toMs,
+    });
+    const axis = lines[lines.length - 1] ?? "";
+    expect(axis).toContain(formatDateTimeCompact(windowStart));
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const bottom = lines[unitsIdx + height] ?? "";
+    // Leading idle buckets must leave zero glyphs on the baseline (not blank).
+    expect(bottom).toMatch(/[o*+x·]/);
+  });
+
+  it("trimTrendEmptyEdges drops leading/trailing zero buckets", () => {
+    const day = 86_400_000;
+    const base = Date.UTC(2026, 2, 1);
+    const raw = [
+      point({ startMs: base }),
+      point({ startMs: base + day }),
+      point({ startMs: base + 2 * day, outputTokens: 10 }),
+      point({ startMs: base + 3 * day, outputTokens: 20 }),
+      point({ startMs: base + 4 * day }),
+    ];
+    const trimmed = trimTrendEmptyEdges(raw);
+    expect(trimmed).toHaveLength(2);
+    expect(trimmed[0]!.outputTokens).toBe(10);
+    expect(trimmed[1]!.outputTokens).toBe(20);
   });
 
   it("colorize wraps series glyphs in ANSI without exceeding width", () => {

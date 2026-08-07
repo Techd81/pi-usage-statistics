@@ -92,16 +92,18 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("Cache read");
     expect(text).toContain("Cache hit");
     expect(text).toContain("使用趋势");
-    expect(text).toMatch(/\d{2}-\d{2} \d{2}:\d{2}\s+-\s+\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(text).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}\s+-\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
     // Overlay legend (glyph forms) — not the old six independent trendBar rows.
     expect(text).toContain("Cost(·$)");
     expect(text).toContain("Cache write(+)");
     expect(text).toContain("Cache read(*)");
     expect(text).toContain("Input(o)");
     expect(text).toContain("Output(x)");
-    expect(text).toContain("tokens <- | -> cost($)");
+    expect(text).toContain("tokens (log) <- | -> cost($)");
     expect(text).not.toMatch(/\btotal\(/i);
-    // ANSI Shadow terminal art: Pi Usage + Statistics (same font).
+    // ANSI Shadow terminal art: π (top bar + two legs) above USAGE + Statistics.
+    expect(text).toContain("████████████╗");
+    expect(text).toContain("╚═██╔═══██╔═╝");
     expect(text).toContain("██████");
     expect(text).toContain("███████╗████████╗");
     // Trend title + legend are centered (leading spaces before 使用趋势 / Cost).
@@ -125,7 +127,7 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toMatch(/[⣿⣷⣧⣇⡇⣶⣦⣤⣄⣀⡀⠀⠉⠁]/);
     // Status line keys match real bindings (no [s], has [m]).
     expect(text).toContain("范围: 全局");
-    expect(text).toContain("时间: 今天");
+    expect(text).toContain("时间: 当天");
     expect(text).toContain("[p]项目 [g]全局 [m] models [t]时间 [ESC]back");
     expect(text).not.toContain("[q]");
     expect(text).not.toContain("[s]");
@@ -438,15 +440,31 @@ describe("UsageDashboardComponent.handleInput", () => {
   it("t cycles time range and recomputes from the new window", async () => {
     const deps = await makeDeps();
     const component = new UsageDashboardComponent(deps);
+    const order = ["today", "1d", "7d", "14d", "30d", "1y", "all", "today"] as const;
     expect(component.currentTimeRange).toBe("today");
-    component.handleInput("t");
-    expect(component.currentTimeRange).toBe("7d");
-    component.handleInput("t");
-    expect(component.currentTimeRange).toBe("30d");
-    component.handleInput("t");
+    for (let i = 1; i < order.length; i++) {
+      component.handleInput("t");
+      expect(component.currentTimeRange).toBe(order[i]);
+    }
+  });
+
+  it("全部 title/axis use first-token time → now (not ～ / epoch)", async () => {
+    const deps = await makeDeps();
+    const component = new UsageDashboardComponent(deps);
+    for (let i = 0; i < 6; i++) component.handleInput("t"); // → all
     expect(component.currentTimeRange).toBe("all");
-    component.handleInput("t");
-    expect(component.currentTimeRange).toBe("today");
+    const lines = component.render(120);
+    const text = lines.join("\n");
+    expect(text).toMatch(/使用趋势\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}\s+-\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(text).not.toMatch(/使用趋势\s+～/);
+    expect(text).not.toMatch(/使用趋势\s+1970-/);
+    const axis = [...lines]
+      .reverse()
+      .find((line) => /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(line) && !line.includes("使用趋势"));
+    expect(axis).toBeDefined();
+    expect(axis!).not.toContain("~");
+    // Right tick must be present (forced axisToMs).
+    expect(axis!).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
   });
 
   it("p/g/t keep the current viewMode", async () => {

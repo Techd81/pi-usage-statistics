@@ -1,10 +1,11 @@
 /**
  * Zero-dependency overlaid multi-series ASCII trend chart for the TUI
- * dashboard. Inspired by asciichart: sample → dual-normalize → paint grid
- * → string[]. Token series share one scale; cost is normalized independently.
- * Colors are applied after the plain grid fits `width` (never before).
- * Adjacent samples are joined with Bresenham segments for a continuous line
- * feel (less scatter than isolated glyphs).
+ * dashboard. Sample → dual-normalize → scatter paint → string[].
+ * Token series share one log-compressed scale (so Cache read cannot crush
+ * Input/Output to the baseline); cost is normalized independently on a
+ * linear right axis. Only sample glyphs are painted — no connecting lines
+ * (connectors clutter multi-series overlays). Colors are applied after the
+ * plain grid fits `width` (never before).
  */
 import type { TrendPoint } from "../domain";
 import {
@@ -20,10 +21,29 @@ import {
 export type TrendChartOptions = {
   /** Total row budget (display columns). */
   width: number;
-  /** Plot body height in rows (clamped 3–14). */
+  /** Plot body height in rows (clamped 3–18). */
   height?: number;
   /** Apply fixed ANSI series colors after layout. Default true. */
   colorize?: boolean;
+  /**
+   * Explicit x-axis end label time (ms). Defaults to the last sample's
+   * startMs. Pass the filter `toMs` so the right tick matches the title
+   * range even when the last bucket start is earlier.
+   */
+  axisToMs?: number;
+  /**
+   * Explicit x-axis start label time (ms). Defaults to the first sample.
+   * When `openStart` is true, the left tick renders as `~`.
+   */
+  axisFromMs?: number;
+  /** Left x-axis tick is an open start (`~`) — used for「全部」. */
+  openStart?: boolean;
+  /**
+   * Sparse X paint after column-max sampling. Use for「全部」only: dense
+   * flat plateaus would otherwise read as solid horizontal bars. Bounded
+   * ranges (today/1d/…/1y) must paint every column so activity stays visible.
+   */
+  sparsePaint?: boolean;
 };
 
 type ScaleKind = "token" | "cost";
@@ -31,25 +51,22 @@ type ScaleKind = "token" | "cost";
 type SeriesSpec = {
   legend: string;
   scale: ScaleKind;
-  /** Plain glyph used when colorize is off (and as the ink cell). */
+  /** Plain glyph used at sample columns. */
   glyph: string;
   /** ANSI SGR open sequence (no reset). */
   ansi: string;
-  /** Optional area fill under the line (cache read). */
-  fill?: boolean;
   value: (point: TrendPoint) => number;
 };
 
 const RESET = "\u001b[0m";
 
-/** Paint order: fill first, cost last so the dashed cost line stays visible. */
+/** Series defs — legend order is LEGEND_ORDER; paint order is handled below. */
 const SERIES: readonly SeriesSpec[] = [
   {
     legend: "Cache read",
     scale: "token",
     glyph: "*",
     ansi: "\u001b[35m",
-    fill: true,
     value: (p) => p.cacheReadTokens,
   },
   {
@@ -85,21 +102,22 @@ const SERIES: readonly SeriesSpec[] = [
 /** Legend order matching the product reference (Cost first). */
 const LEGEND_ORDER = ["Cost", "Cache write", "Cache read", "Input", "Output"] as const;
 
-type Cell = { ch: string; series: number | null };
+type Cell = { ch: string; series: number | null; zero: boolean };
 
 type Sampled = {
+  /** Time label per plot column (for mid tick). */
   startMs: number[];
-  /** Parallel to SERIES entries with scale === "token". */
+  /** Parallel to SERIES token entries; NaN = no sample in this column. */
   tokenSeries: number[][];
+  /** NaN = no sample in this column. */
   cost: number[];
 };
 
 const clampHeight = (height: number | undefined, width: number): number => {
-  // Slightly taller on wide terminals for a finer continuous-line plot.
-  const fallback = width < 40 ? 5 : width < 60 ? 8 : 11;
+  const fallback = width < 40 ? 5 : width < 60 ? 9 : width < 90 ? 12 : 15;
   const h = height ?? fallback;
   if (!Number.isFinite(h) || h < 3) return 3;
-  return Math.min(14, Math.floor(h));
+  return Math.min(18, Math.floor(h));
 };
 
 const safeMax = (values: readonly number[]): number => {
@@ -110,18 +128,61 @@ const safeMax = (values: readonly number[]): number => {
   return max;
 };
 
-/** Map a value onto row index 0 (top/max) … height-1 (bottom/zero). */
-const toRow = (value: number, max: number, height: number): number => {
+const pointActive = (p: TrendPoint): boolean =>
+  p.inputTokens > 0 ||
+  p.outputTokens > 0 ||
+  p.cacheReadTokens > 0 ||
+  p.cacheWriteTokens > 0 ||
+  (p.cost.amount ?? 0) > 0;
+
+/**
+ * Drop leading / trailing all-zero buckets so「全部」(epoch→now) does not
+ * squash real activity into the last few columns. Keeps at least one point.
+ */
+export function trimTrendEmptyEdges(points: readonly TrendPoint[]): TrendPoint[] {
+  if (points.length === 0) return [];
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo < points.length && !pointActive(points[lo]!)) lo++;
+  while (hi > lo && !pointActive(points[hi]!)) hi--;
+  if (lo === 0 && hi === points.length - 1) return points as TrendPoint[];
+  if (lo >= points.length) return points.slice(0, 1) as TrendPoint[];
+  return points.slice(lo, hi + 1);
+}
+
+/**
+ * Map a value onto row index 0 (top/max) … height-1 (bottom/zero).
+ * Token series use log1p compression; cost stays linear on its own max.
+ */
+const toRow = (value: number, max: number, height: number, mode: "log" | "linear"): number => {
   if (height <= 1) return 0;
   if (max <= 0 || !Number.isFinite(value) || value <= 0) return height - 1;
-  const ratio = Math.max(0, Math.min(1, value / max));
+  let ratio: number;
+  if (mode === "log") {
+    const denom = Math.log1p(max);
+    ratio = denom > 0 ? Math.log1p(value) / denom : 0;
+  } else {
+    ratio = value / max;
+  }
+  ratio = Math.max(0, Math.min(1, ratio));
   return height - 1 - Math.round(ratio * (height - 1));
 };
 
+const logMidValue = (max: number): number => {
+  if (max <= 0) return 0;
+  return Math.expm1(Math.log1p(max) / 2);
+};
+
 /**
- * Downsample `points` to exactly `cols` slots by averaging each bucket.
+ * Downsample `points` into exactly `cols` columns by max-pooling each slice.
+ *
+ * Why max (not stride-pick): a 30d/1y window is mostly leading empty buckets.
+ * Uniform index stride lands almost all picks in the zero prefix and only the
+ * forced last point carries real data → chart looks "all zeros". Column max
+ * keeps every time slice, so the active tail still shows peaks while idle
+ * slices stay explicit 0 (baseline glyphs).
  */
-function resample(points: readonly TrendPoint[], cols: number): Sampled {
+function columnMaxSample(points: readonly TrendPoint[], cols: number): Sampled {
   const tokenSpecs = SERIES.filter((s) => s.scale === "token");
   const empty: Sampled = {
     startMs: [],
@@ -138,18 +199,21 @@ function resample(points: readonly TrendPoint[], cols: number): Sampled {
     const from = Math.floor((c * points.length) / cols);
     const to = Math.max(from + 1, Math.floor(((c + 1) * points.length) / cols));
     const slice = points.slice(from, to);
-    const n = slice.length || 1;
-    startMs.push(slice[0]?.startMs ?? 0);
-    let costSum = 0;
-    const tokenSums = tokenSpecs.map(() => 0);
+    // Prefer last bucket's start so the rightmost column tracks range end.
+    startMs.push(slice[slice.length - 1]?.startMs ?? slice[0]?.startMs ?? 0);
+
+    let costMax = 0;
+    const tokenMaxes = tokenSpecs.map(() => 0);
     for (const p of slice) {
-      costSum += p.cost.amount ?? 0;
+      const cAmt = p.cost.amount ?? 0;
+      if (cAmt > costMax) costMax = cAmt;
       tokenSpecs.forEach((spec, i) => {
-        tokenSums[i]! += spec.value(p);
+        const v = spec.value(p);
+        if (v > tokenMaxes[i]!) tokenMaxes[i] = v;
       });
     }
-    cost.push(costSum / n);
-    tokenSums.forEach((sum, i) => tokenSeries[i]!.push(sum / n));
+    cost.push(costMax);
+    tokenMaxes.forEach((v, i) => tokenSeries[i]!.push(v));
   }
 
   return { startMs, tokenSeries, cost };
@@ -175,7 +239,6 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
 
   const lines: string[] = [];
 
-  // Legend: Cost(·$) · Cache write(+) · … — centered; glyph+$ cues dual scale.
   const legendParts = LEGEND_ORDER.map((name) => {
     const spec = SERIES.find((s) => s.legend === name)!;
     const unit = spec.scale === "cost" ? `${spec.glyph}$` : spec.glyph;
@@ -184,7 +247,7 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
   });
   lines.push(centerInWidth(legendParts.join("  "), width));
 
-  const unitsCue = "tokens <- | -> cost($)";
+  const unitsCue = "tokens (log) <- | -> cost($)";
   if (width >= displayWidth(unitsCue) + 2) {
     lines.push(centerInWidth(unitsCue, width));
   }
@@ -200,7 +263,6 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
   const costMax = safeMax(trend.map((p) => p.cost.amount ?? 0));
   const leftLabel = formatTokenTick(tokenMax);
   const rightLabel = formatCostTick(costMax);
-  // Drop side scales when they would leave fewer than 4 plot columns.
   const minPlot = 4;
   let leftW = Math.min(8, Math.max(2, displayWidth(leftLabel) + 1));
   let rightW = 0;
@@ -211,113 +273,121 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
     leftW = 0;
     rightW = 0;
   }
-  // Never claim more plot columns than the remaining width (narrow terminals).
   const plotW = Math.max(1, width - leftW - rightW);
 
-  const sampled = resample(trend, plotW);
+  const axisTo = Number.isFinite(options.axisToMs)
+    ? options.axisToMs!
+    : trend[trend.length - 1]!.startMs;
+  const axisFromBound = Number.isFinite(options.axisFromMs)
+    ? options.axisFromMs!
+    : trend[0]!.startMs;
+
+  const sampled = columnMaxSample(trend, plotW);
   const { tokenSeries, cost, startMs } = sampled;
 
   const grid: Cell[][] = Array.from({ length: height }, () =>
-    Array.from({ length: plotW }, () => ({ ch: " ", series: null as number | null })),
+    Array.from({ length: plotW }, () => ({ ch: " ", series: null as number | null, zero: false })),
   );
 
-  const paintPoint = (row: number, col: number, seriesIdx: number, ch: string): void => {
+  const paintPoint = (row: number, col: number, seriesIdx: number, ch: string, value: number): void => {
     if (row < 0 || row >= height || col < 0 || col >= plotW) return;
-    grid[row]![col] = { ch, series: seriesIdx };
-  };
-
-  /**
-   * Bresenham segment so consecutive samples form a continuous run instead of
-   * isolated scatter points. Cost stays dashed (every other cell).
-   */
-  const paintSegment = (
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    seriesIdx: number,
-    glyph: string,
-    dashed: boolean,
-  ): void => {
-    const dx = Math.abs(x1 - x0);
-    const dy = Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1;
-    const sy = y0 < y1 ? 1 : -1;
-    let err = dx - dy;
-    let x = x0;
-    let y = y0;
-    let step = 0;
-    for (;;) {
-      // Always ink the segment endpoint so a dashed cost run does not drop
-      // the final sample column (step would be odd on a 1-wide segment).
-      const atEnd = x === x1 && y === y1;
-      if (!dashed || step % 2 === 0 || atEnd) {
-        paintPoint(y, x, seriesIdx, glyph);
+    const isZero = value <= 0;
+    if (!isZero) {
+      const cur = grid[row]![col]!;
+      // Don't let Cost erase a token peak when both land on the same cell
+      // (common on flat「全部」windows where log tokens and cost both hug the top).
+      if (
+        cur.series !== null &&
+        !cur.zero &&
+        SERIES[seriesIdx]!.scale === "cost" &&
+        SERIES[cur.series]!.scale === "token"
+      ) {
+        return;
       }
-      if (atEnd) break;
-      const e2 = 2 * err;
-      if (e2 > -dy) {
-        err -= dy;
-        x += sx;
-      }
-      if (e2 < dx) {
-        err += dx;
-        y += sy;
-      }
-      step++;
-      // Safety: never spin on degenerate input.
-      if (step > dx + dy + 2) break;
-    }
-  };
-
-  const paintLine = (rows: number[], seriesIdx: number, glyph: string, dashed: boolean): void => {
-    if (rows.length === 0) return;
-    if (rows.length === 1) {
-      paintPoint(rows[0]!, 0, seriesIdx, glyph);
+      grid[row]![col] = { ch, series: seriesIdx, zero: false };
       return;
     }
-    for (let x = 0; x < rows.length - 1; x++) {
-      paintSegment(x, rows[x]!, x + 1, rows[x + 1]!, seriesIdx, glyph, dashed);
-    }
-  };
-
-  const paintFill = (rows: number[], seriesIdx: number): void => {
-    for (let x = 0; x < rows.length; x++) {
-      const y = rows[x]!;
-      for (let r = y + 1; r < height; r++) {
-        if (grid[r]![x]!.series === null) {
-          grid[r]![x] = { ch: ".", series: seriesIdx };
-        }
+    // Zeros: keep every series visible. Prefer exact/neighbor empty cells;
+    // when the baseline is saturated, interleave by column so +/o/x/· all show.
+    const tryCol = (c: number, allowInterleave: boolean): boolean => {
+      if (c < 0 || c >= plotW) return false;
+      const cur = grid[row]![c]!;
+      if (cur.series !== null && !cur.zero) return false;
+      if (cur.series !== null && cur.zero && cur.series !== seriesIdx) {
+        if (!allowInterleave || c % SERIES.length !== seriesIdx) return false;
       }
+      grid[row]![c] = { ch, series: seriesIdx, zero: true };
+      return true;
+    };
+    if (tryCol(col, false)) return;
+    for (let d = 1; d <= 4; d++) {
+      if (tryCol(col + d, false) || tryCol(col - d, false)) return;
+    }
+    tryCol(col, true);
+  };
+
+  /** Paint finite samples; `zerosOnly` selects baseline zeros vs peaks. */
+  const paintScatter = (
+    rows: number[],
+    values: readonly number[],
+    seriesIdx: number,
+    glyph: string,
+    zerosOnly: boolean,
+  ): void => {
+    // Sparse X only for non-zero peaks on「全部」. Zeros always paint every
+    // column — otherwise Cache write=0 / idle buckets vanish from the baseline.
+    const sparsePeaks = options.sparsePaint === true && !zerosOnly;
+    const stride = sparsePeaks ? Math.max(3, Math.ceil(plotW / 16)) : 1;
+    const n = values.length;
+    for (let x = 0; x < n; x++) {
+      const value = values[x]!;
+      if (!Number.isFinite(value)) continue;
+      if (zerosOnly ? value > 0 : value <= 0) continue;
+      if (sparsePeaks && x !== 0 && x !== n - 1 && x % stride !== 0) continue;
+      paintPoint(rows[x]!, x, seriesIdx, glyph, value);
     }
   };
 
-  SERIES.forEach((spec, seriesIdx) => {
-    let samples: number[];
-    if (spec.scale === "cost") {
-      samples = cost;
-    } else {
-      const tokenIdx = SERIES.filter((s) => s.scale === "token").findIndex((s) => s.legend === spec.legend);
-      samples = tokenSeries[tokenIdx] ?? [];
-    }
-    const max = spec.scale === "cost" ? costMax : tokenMax;
-    const rows = samples.map((v) => toRow(v, max, height));
-    if (spec.fill) paintFill(rows, seriesIdx);
-    paintLine(rows, seriesIdx, spec.glyph, spec.scale === "cost");
-  });
+  // Pass 1: non-zero peaks. Pass 2: zeros (with neighbor spill so Cost/Cache
+  // write/Input/Output zeros are not buried under each other).
+  const paintAll = (zerosOnly: boolean): void => {
+    SERIES.forEach((spec, seriesIdx) => {
+      let samples: number[];
+      if (spec.scale === "cost") {
+        samples = cost;
+      } else {
+        const tokenIdx = SERIES.filter((s) => s.scale === "token").findIndex((s) => s.legend === spec.legend);
+        samples = tokenSeries[tokenIdx] ?? [];
+      }
+      const max = spec.scale === "cost" ? costMax : tokenMax;
+      const mode = spec.scale === "cost" ? "linear" : "log";
+      const rows = samples.map((v) => (Number.isFinite(v) ? toRow(v, max, height, mode) : -1));
+      paintScatter(rows, samples, seriesIdx, spec.glyph, zerosOnly);
+    });
+  };
+  paintAll(false);
+  paintAll(true);
+
+  const midRow = Math.floor((height - 1) / 2);
+  const tokenMid = logMidValue(tokenMax);
+  const costMid = costMax / 2;
 
   for (let r = 0; r < height; r++) {
     let left = "";
     if (leftW > 0) {
       if (r === 0) left = padStartToWidth(truncateToWidth(formatTokenTick(tokenMax), leftW), leftW);
       else if (r === height - 1) left = padStartToWidth(truncateToWidth("0", leftW), leftW);
-      else left = " ".repeat(leftW);
+      else if (r === midRow && height >= 7 && tokenMax > 0) {
+        left = padStartToWidth(truncateToWidth(formatTokenTick(tokenMid), leftW), leftW);
+      } else left = " ".repeat(leftW);
     }
     let right = "";
     if (rightW > 0) {
       if (r === 0) right = padStartToWidth(truncateToWidth(formatCostTick(costMax), rightW), rightW);
       else if (r === height - 1) right = padStartToWidth(truncateToWidth("$0", rightW), rightW);
-      else right = " ".repeat(rightW);
+      else if (r === midRow && height >= 7 && costMax > 0) {
+        right = padStartToWidth(truncateToWidth(formatCostTick(costMid), rightW), rightW);
+      } else right = " ".repeat(rightW);
     }
 
     let plot = "";
@@ -332,7 +402,20 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
     lines.push(truncateToWidth(`${left}${plot}${right}`, width));
   }
 
-  lines.push(truncateToWidth(buildXAxis(startMs, plotW, leftW, rightW, width), width));
+  // Time baseline — a dedicated `─` row under the plot so Cost/series glyphs
+  // on y=0 are not mistaken for the axis itself.
+  {
+    const left = leftW > 0 ? " ".repeat(leftW) : "";
+    const right = rightW > 0 ? " ".repeat(rightW) : "";
+    lines.push(truncateToWidth(`${left}${"─".repeat(plotW)}${right}`, width));
+  }
+
+  const axisFrom =
+    options.openStart === true
+      ? null
+      : axisFromBound;
+
+  lines.push(truncateToWidth(buildXAxis(startMs, plotW, leftW, rightW, width, axisFrom, axisTo), width));
   return lines.map((line) => truncateToWidth(line, width));
 }
 
@@ -342,6 +425,8 @@ function buildXAxis(
   leftW: number,
   rightW: number,
   width: number,
+  axisFrom: number | null,
+  axisTo: number,
 ): string {
   if (startMs.length === 0 || plotW <= 0) {
     return "".padEnd(Math.max(0, width), " ");
@@ -360,8 +445,8 @@ function buildXAxis(
     }
   };
 
-  const first = formatDateTimeCompact(startMs[0]!);
-  const last = formatDateTimeCompact(startMs[startMs.length - 1]!);
+  const first = axisFrom === null ? "~" : formatDateTimeCompact(axisFrom);
+  const last = formatDateTimeCompact(axisTo);
   place(first, 0, true);
 
   if (plotW >= 36 && startMs.length >= 3) {
@@ -369,8 +454,10 @@ function buildXAxis(
     place(formatDateTimeCompact(startMs[mid]!), Math.max(0, mid - Math.floor(first.length / 2)), false);
   }
 
-  if (plotW >= first.length + last.length + 2) {
-    place(last, plotW - last.length, false);
+  // Always force the end tick so it cannot be dropped by a mid-label collision
+  // (that bug made「全部」bottom axis stop months before the title end).
+  if (plotW >= first.length + last.length + 1) {
+    place(last, plotW - last.length, true);
   }
 
   const left = leftW > 0 ? " ".repeat(leftW) : "";

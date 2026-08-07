@@ -19,6 +19,7 @@ import {
   hitRateBar,
   padStartToWidth,
   padToWidth,
+  timeRangeLabel,
   trendBar,
   truncateToWidth,
 } from "../format";
@@ -194,17 +195,36 @@ describe("centerInWidth / forceWidth", () => {
 });
 
 describe("formatDateTimeCompact / formatDateRange", () => {
-  it("formats local compact date-time and ranges", () => {
+  it("formats local compact date-time and ranges with year", () => {
     const ms = new Date(2026, 7, 7, 14, 30, 0).getTime(); // Aug 7 local
-    expect(formatDateTimeCompact(ms)).toBe("08-07 14:30");
+    expect(formatDateTimeCompact(ms)).toBe("2026-08-07 14:30");
     const from = new Date(2026, 7, 1, 0, 0, 0).getTime();
-    expect(formatDateRange(from, ms)).toBe("08-01 00:00 - 08-07 14:30");
+    expect(formatDateRange(from, ms)).toBe("2026-08-01 00:00 - 2026-08-07 14:30");
+  });
+
+  it("uses open-start ～ when fromMs is 0 (全部)", () => {
+    const ms = new Date(2026, 7, 7, 17, 17, 0).getTime();
+    expect(formatDateRange(0, ms)).toBe("～ - 2026-08-07 17:17");
+    // Epoch must never render as a fake calendar start in the title.
+    expect(formatDateRange(0, ms)).not.toMatch(/～ - 1970-/);
+    // ASCII `~ -` must not be used (fonts merge it into `--`).
+    expect(formatDateRange(0, ms)).not.toMatch(/^~ -/);
+  });
+
+  it("labels the expanded time-range cycle", () => {
+    expect(timeRangeLabel("today")).toBe("当天");
+    expect(timeRangeLabel("1d")).toBe("1d");
+    expect(timeRangeLabel("7d")).toBe("7d");
+    expect(timeRangeLabel("14d")).toBe("14d");
+    expect(timeRangeLabel("30d")).toBe("30d");
+    expect(timeRangeLabel("1y")).toBe("1year");
+    expect(timeRangeLabel("all")).toBe("全部");
   });
 
   it("counts en/em dashes as 1 column (Windows Terminal)", () => {
     expect(displayWidth("—")).toBe(1);
     expect(displayWidth("–")).toBe(1);
-    expect(displayWidth("08-07 00:00 - 08-07 16:15")).toBe(25);
+    expect(displayWidth("2026-08-07 00:00 - 2026-08-07 16:15")).toBe(35);
   });
 
   it("ignores emoji variation selectors when measuring width", () => {
@@ -212,7 +232,7 @@ describe("formatDateTimeCompact / formatDateRange", () => {
   });
 
   it("collapses non-finite ms safely", () => {
-    expect(formatDateTimeCompact(Number.NaN)).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(formatDateTimeCompact(Number.NaN)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 });
 

@@ -282,34 +282,45 @@ export function trendBar(values: readonly number[], maxLen = 80): string {
 const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 /**
- * Compact local date-time for trend axis ticks (e.g. `08-07 14:30`).
- * Non-finite inputs collapse to `00-00 00:00`.
+ * Compact local date-time for trend titles and axis ticks
+ * (e.g. `2026-08-07 14:30`). Non-finite inputs collapse to epoch local time.
  */
 export function formatDateTimeCompact(ms: number): string {
   const t = Number.isFinite(ms) ? ms : 0;
   const d = new Date(t);
-  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 /**
  * Inclusive date-time range for the trend section title
- * (e.g. `08-01 00:00 - 08-07 14:30`).
- * ASCII hyphen only — Unicode em dashes are ambiguous-width on some terminals
- * and used to punch a hole in the outer frame on this centered title row.
+ * (e.g. `2026-08-01 00:00 - 2026-08-07 14:30`).
+ * When `fromMs <= 0` (empty open start), the left side is fullwidth `～`
+ * (e.g. `～ - 2026-08-07 14:30`) — never epoch as a fake start date.
+ * 「全部」with data should pass the first-token timestamp instead.
+ * Fullwidth tilde avoids ASCII `~ -` collapsing into a `--` look in many fonts.
+ * ASCII hyphen only between sides — Unicode em dashes punch frame holes.
  */
 export function formatDateRange(fromMs: number, toMs: number): string {
-  return `${formatDateTimeCompact(fromMs)} - ${formatDateTimeCompact(toMs)}`;
+  const right = formatDateTimeCompact(toMs);
+  if (!Number.isFinite(fromMs) || fromMs <= 0) return `～ - ${right}`;
+  return `${formatDateTimeCompact(fromMs)} - ${right}`;
 }
 
 /** Display label for a time-range selector. */
-export function timeRangeLabel(range: "today" | "7d" | "30d" | "all"): string {
+export function timeRangeLabel(range: "today" | "1d" | "7d" | "14d" | "30d" | "1y" | "all"): string {
   switch (range) {
     case "today":
-      return "今天";
+      return "当天";
+    case "1d":
+      return "1d";
     case "7d":
-      return "7天";
+      return "7d";
+    case "14d":
+      return "14d";
     case "30d":
-      return "30天";
+      return "30d";
+    case "1y":
+      return "1year";
     case "all":
       return "全部";
   }

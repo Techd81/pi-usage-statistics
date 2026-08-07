@@ -6,7 +6,7 @@
  *   defaults to `global` and can be switched to `project` (records of the
  *   current cwd).
  * - Keys: `p`/`g` scope switch, `m` models-view toggle, `t` time-range
- *   cycle (今天 → 7天 → 30天 → 全部), `Esc` back (models → main first,
+ *   cycle (当天 → 1d → 7d → 14d → 30d → 1year → 全部), `Esc` back (models → main first,
  *   then close).
  * - Dual views: the default main view shows a hero Total tokens + Requests/
  *   Cost summary (with icons), five metric slots, and the Usage trend chart
@@ -40,14 +40,14 @@ import {
   timeRangeLabel,
   truncateToWidth,
 } from "./format";
-import { renderTrendChart } from "./trend-chart";
+import { renderTrendChart, trimTrendEmptyEdges } from "./trend-chart";
 import { renderTitleBanner } from "./title-banner";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
 
 /** Relative time window applied via `filters.fromMs`. */
-export type TimeRange = "today" | "7d" | "30d" | "all";
+export type TimeRange = "today" | "1d" | "7d" | "14d" | "30d" | "1y" | "all";
 
 /** Presentation view: hero+metrics+trend, or the per-model table. */
 export type ViewMode = "main" | "models";
@@ -90,16 +90,31 @@ const rangeFromMs = (range: TimeRange, now: number): number => {
       start.setHours(0, 0, 0, 0);
       return start.getTime();
     }
+    case "1d":
+      return now - DAY_MS;
     case "7d":
       return now - 7 * DAY_MS;
+    case "14d":
+      return now - 14 * DAY_MS;
     case "30d":
       return now - 30 * DAY_MS;
+    case "1y":
+      return now - 365 * DAY_MS;
     case "all":
       return 0;
   }
 };
 
-const NEXT_RANGE: Record<TimeRange, TimeRange> = { today: "7d", "7d": "30d", "30d": "all", all: "today" };
+/** `[t]` cycles: 当天 → 1d → 7d → 14d → 30d → 1year → 全部 → … */
+const NEXT_RANGE: Record<TimeRange, TimeRange> = {
+  today: "1d",
+  "1d": "7d",
+  "7d": "14d",
+  "14d": "30d",
+  "30d": "1y",
+  "1y": "all",
+  all: "today",
+};
 
 /** Build query filters from scope + time range; single decode point. */
 export function filtersFor(scope: Scope, timeRange: TimeRange, projectCwd: string, now: number): UsageFilters {
@@ -520,20 +535,33 @@ export class UsageDashboardComponent {
    * outer `render` truncate/frame pass keeps every row within `width`.
    */
   private renderTrend(lines: string[], result: UsageQueryResult, width: number, wide: boolean): void {
-    const fromMs =
-      result.filters.fromMs > 0
-        ? result.filters.fromMs
-        : (result.trend[0]?.startMs ?? result.filters.fromMs);
+    const isAllTime = !(result.filters.fromMs > 0);
+    const filterFrom = result.filters.fromMs;
     const toMs =
       result.filters.toMs < Number.MAX_SAFE_INTEGER
         ? result.filters.toMs
         : (result.trend[result.trend.length - 1]?.startMs ?? result.filters.toMs);
+    // 「全部」: domain already starts buckets at first token; trim is a safety net.
+    // Bounded windows keep the full filter span — idle days stay on-axis.
+    const trend = isAllTime ? trimTrendEmptyEdges(result.trend) : result.trend;
+    // Title/axis: first-token time → now (never epoch / ～ once data exists).
+    const dataFromMs = trend[0]?.startMs ?? 0;
+    const fromMs = isAllTime ? dataFromMs : filterFrom;
+    const openStart = !(fromMs > 0);
     const range = formatDateRange(fromMs, toMs);
     const titlePlain = `${withIcon(ICONS.trend, "使用趋势", wide)}  ${range}`;
     lines.push(this.theme.selected(centerInWidth(titlePlain, width)));
-    // Noop theme in tests: skip ANSI so structural asserts stay stable.
     const colorize = this.theme !== noopTheme;
-    for (const row of renderTrendChart(result.trend, { width, colorize })) {
+    const chartOpts = {
+      width,
+      colorize,
+      openStart,
+      // Sparse X only for「全部」— never for 当天/1d/…/1y.
+      sparsePaint: isAllTime,
+      axisToMs: toMs,
+      ...(openStart ? {} : { axisFromMs: fromMs }),
+    };
+    for (const row of renderTrendChart(trend, chartOpts)) {
       lines.push(row);
     }
   }

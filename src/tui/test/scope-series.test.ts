@@ -40,9 +40,12 @@ describe("filtersFor (single decode point)", () => {
     expect(filters.fromMs).toBe(midnight.getTime());
   });
 
-  it("7d / 30d compute relative windows", () => {
+  it("7d / 30d / 1d / 14d / 1y compute relative windows", () => {
+    expect(filtersFor("global", "1d", "", NOW).fromMs).toBe(NOW - 86_400_000);
     expect(filtersFor("global", "7d", "", NOW).fromMs).toBe(NOW - 7 * 86_400_000);
+    expect(filtersFor("global", "14d", "", NOW).fromMs).toBe(NOW - 14 * 86_400_000);
     expect(filtersFor("global", "30d", "", NOW).fromMs).toBe(NOW - 30 * 86_400_000);
+    expect(filtersFor("global", "1y", "", NOW).fromMs).toBe(NOW - 365 * 86_400_000);
   });
 });
 
@@ -133,6 +136,6 @@ describe("runUsageStatsCommand argument resolution", () => {
 
 // Keep Scope/TimeRange type usage so the exports stay covered by the compiler.
 const _scopeTypes: Scope[] = ["global", "project"];
-const _rangeTypes: TimeRange[] = ["today", "7d", "30d", "all"];
+const _rangeTypes: TimeRange[] = ["today", "1d", "7d", "14d", "30d", "1y", "all"];
 void _scopeTypes;
 void _rangeTypes;
