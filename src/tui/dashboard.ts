@@ -541,7 +541,9 @@ export class UsageDashboardComponent {
   private statusLine(): string {
     const scope = scopeLabel(this.scope);
     const time = timeRangeLabel(this.timeRange);
-    return `范围: ${scope} · 时间: ${time} · [p]项目 [g]全局 [m] models [t]时间 [ESC]back`;
+    // 项目视图显示具体路径，用户可确认过滤范围（R2）；空 projectCwd 回退旧文案。
+    const scopeDetail = this.scope === "project" && this.deps.projectCwd !== "" ? ` (${this.deps.projectCwd})` : "";
+    return `范围: ${scope}${scopeDetail} · 时间: ${time} · [p]项目 [g]全局 [m] models [t]时间 [ESC]back`;
   }
 }
 

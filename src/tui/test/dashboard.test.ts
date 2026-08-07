@@ -375,11 +375,22 @@ describe("UsageDashboardComponent.handleInput", () => {
     expect(component.currentScope).toBe("project");
     const projectText = component.render(80).join("\n");
     expect(projectText).toContain("范围: 项目");
+    // R2：项目视图显示具体路径，用户可确认过滤范围
+    expect(projectText).toContain("范围: 项目 (/projects/p1)");
     expect(projectText).not.toContain("范围: 全局");
     expect(renderSpy).toHaveBeenCalled();
 
     component.handleInput("g");
     expect(component.currentScope).toBe("global");
+  });
+
+  it("R2: projectCwd 为空时项目视图回退旧文案（不显示空括号）", async () => {
+    const store = await makeStore("/projects/p1");
+    const component = new UsageDashboardComponent({ store, projectCwd: "", initialScope: "project" });
+    const text = component.render(80).join("\n");
+    expect(text).toContain("范围: 项目");
+    expect(text).not.toContain("范围: 项目 ()");
+    expect(text).not.toContain("范围: 全局");
   });
 
   it("AC3: s no longer toggles a curve-only page; trend stays on main", async () => {
