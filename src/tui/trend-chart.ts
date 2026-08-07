@@ -3,6 +3,8 @@
  * dashboard. Inspired by asciichart: sample → dual-normalize → paint grid
  * → string[]. Token series share one scale; cost is normalized independently.
  * Colors are applied after the plain grid fits `width` (never before).
+ * Adjacent samples are joined with Bresenham segments for a continuous line
+ * feel (less scatter than isolated glyphs).
  */
 import type { TrendPoint } from "../domain";
 import {
@@ -17,7 +19,7 @@ import {
 export type TrendChartOptions = {
   /** Total row budget (display columns). */
   width: number;
-  /** Plot body height in rows (clamped 3–12). */
+  /** Plot body height in rows (clamped 3–14). */
   height?: number;
   /** Apply fixed ANSI series colors after layout. Default true. */
   colorize?: boolean;
@@ -92,10 +94,11 @@ type Sampled = {
 };
 
 const clampHeight = (height: number | undefined, width: number): number => {
-  const fallback = width < 40 ? 4 : width < 60 ? 6 : 8;
+  // Slightly taller on wide terminals for a finer continuous-line plot.
+  const fallback = width < 40 ? 5 : width < 60 ? 8 : 11;
   const h = height ?? fallback;
   if (!Number.isFinite(h) || h < 3) return 3;
-  return Math.min(12, Math.floor(h));
+  return Math.min(14, Math.floor(h));
 };
 
 const safeMax = (values: readonly number[]): number => {
@@ -222,21 +225,58 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
     grid[row]![col] = { ch, series: seriesIdx };
   };
 
-  const paintLine = (rows: number[], seriesIdx: number, glyph: string, dashed: boolean): void => {
-    for (let x = 0; x < rows.length; x++) {
-      const y = rows[x]!;
-      if (!dashed || x % 2 === 0) {
+  /**
+   * Bresenham segment so consecutive samples form a continuous run instead of
+   * isolated scatter points. Cost stays dashed (every other cell).
+   */
+  const paintSegment = (
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    seriesIdx: number,
+    glyph: string,
+    dashed: boolean,
+  ): void => {
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0;
+    let y = y0;
+    let step = 0;
+    for (;;) {
+      // Always ink the segment endpoint so a dashed cost run does not drop
+      // the final sample column (step would be odd on a 1-wide segment).
+      const atEnd = x === x1 && y === y1;
+      if (!dashed || step % 2 === 0 || atEnd) {
         paintPoint(y, x, seriesIdx, glyph);
       }
-      if (x + 1 < rows.length) {
-        const y2 = rows[x + 1]!;
-        const lo = Math.min(y, y2);
-        const hi = Math.max(y, y2);
-        for (let r = lo + 1; r < hi; r++) {
-          if (dashed && (x + r) % 2 === 1) continue;
-          paintPoint(r, x + 1, seriesIdx, dashed ? ":" : "|");
-        }
+      if (atEnd) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        x += sx;
       }
+      if (e2 < dx) {
+        err += dx;
+        y += sy;
+      }
+      step++;
+      // Safety: never spin on degenerate input.
+      if (step > dx + dy + 2) break;
+    }
+  };
+
+  const paintLine = (rows: number[], seriesIdx: number, glyph: string, dashed: boolean): void => {
+    if (rows.length === 0) return;
+    if (rows.length === 1) {
+      paintPoint(rows[0]!, 0, seriesIdx, glyph);
+      return;
+    }
+    for (let x = 0; x < rows.length - 1; x++) {
+      paintSegment(x, rows[x]!, x + 1, rows[x + 1]!, seriesIdx, glyph, dashed);
     }
   };
 

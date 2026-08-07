@@ -273,8 +273,8 @@ describe("per-model aggregates (byModel)", () => {
     ];
     const result = queryUsage(records, filters(), 1);
     expect(result.byModel).toEqual([
-      { model: "claude-sonnet-4-5", requestCount: 2, totalTokens: 150, cost: unavailable },
-      { model: "gpt-5-mini", requestCount: 1, totalTokens: 50, cost: unavailable },
+      { model: "claude-sonnet-4-5", requestCount: 2, totalTokens: 150, cost: unavailable, avgCost: unavailable },
+      { model: "gpt-5-mini", requestCount: 1, totalTokens: 50, cost: unavailable, avgCost: unavailable },
     ]);
   });
 
@@ -284,7 +284,9 @@ describe("per-model aggregates (byModel)", () => {
       makeRecord({ sourceKind: "summary", model: "claude-sonnet-4-5", sourceEntryId: "c1", inputTokens: 50, timestampMs: BASE_TS }),
     ];
     const result = queryUsage(records, filters({ includeSummaryUsage: true }), 1);
-    expect(result.byModel).toEqual([{ model: "claude-sonnet-4-5", requestCount: 1, totalTokens: 150, cost: unavailable }]);
+    expect(result.byModel).toEqual([
+      { model: "claude-sonnet-4-5", requestCount: 1, totalTokens: 150, cost: unavailable, avgCost: unavailable },
+    ]);
   });
 
   it("skips empty model names", () => {
@@ -293,7 +295,9 @@ describe("per-model aggregates (byModel)", () => {
       makeRecord({ model: "gpt-5", sourceEntryId: "e2", inputTokens: 10, timestampMs: BASE_TS }),
     ];
     const result = queryUsage(records, filters(), 1);
-    expect(result.byModel).toEqual([{ model: "gpt-5", requestCount: 1, totalTokens: 10, cost: unavailable }]);
+    expect(result.byModel).toEqual([
+      { model: "gpt-5", requestCount: 1, totalTokens: 10, cost: unavailable, avgCost: unavailable },
+    ]);
   });
 
   it("sorts by requestCount desc, then model name asc (deterministic)", () => {
@@ -330,13 +334,34 @@ describe("per-model aggregates (byModel)", () => {
       makeRecord({ model: "unavail-model", sourceEntryId: "u2", inputTokens: 5, timestampMs: BASE_TS, recordedCost: cost(1, 0, 0, 0) }),
     ];
     const result = queryUsage(records, filters(), 1);
-    const byName = Object.fromEntries(result.byModel.map((entry) => [entry.model, entry.cost]));
-    expect(byName["rec-model"]).toEqual({ amount: 3, status: "recorded", currency: "USD" });
-    expect(byName["est-model"]).toEqual({ amount: 7, status: "estimated", currency: "USD" });
-    expect(byName["mix-model"]).toEqual({ amount: 3, status: "mixed", currency: "USD" });
-    expect(byName["unavail-model"]).toEqual({ amount: null, status: "unavailable", currency: "USD" });
+    const byName = Object.fromEntries(result.byModel.map((entry) => [entry.model, entry]));
+    expect(byName["rec-model"]!.cost).toEqual({ amount: 3, status: "recorded", currency: "USD" });
+    expect(byName["rec-model"]!.avgCost).toEqual({ amount: 3, status: "recorded", currency: "USD" });
+    expect(byName["est-model"]!.cost).toEqual({ amount: 7, status: "estimated", currency: "USD" });
+    expect(byName["est-model"]!.avgCost).toEqual({ amount: 7, status: "estimated", currency: "USD" });
+    expect(byName["mix-model"]!.cost).toEqual({ amount: 3, status: "mixed", currency: "USD" });
+    expect(byName["mix-model"]!.avgCost).toEqual({ amount: 1.5, status: "mixed", currency: "USD" });
+    expect(byName["unavail-model"]!.cost).toEqual({ amount: null, status: "unavailable", currency: "USD" });
+    expect(byName["unavail-model"]!.avgCost).toEqual({ amount: null, status: "unavailable", currency: "USD" });
     // Per-model costs do not change overall totals aggregation.
     expect(result.totals.totalTokens).toBe(55);
     expect(result.totals.requestCount).toBe(6);
+  });
+
+  it("avgCost is amount/requestCount when computable, else unavailable", () => {
+    const records = [
+      makeRecord({ model: "pair", sourceEntryId: "a", inputTokens: 10, timestampMs: BASE_TS, recordedCost: cost(2, 0, 0, 0) }),
+      makeRecord({ model: "pair", sourceEntryId: "b", inputTokens: 10, timestampMs: BASE_TS, recordedCost: cost(4, 0, 0, 0) }),
+      makeRecord({ sourceKind: "summary", model: "summary-only", sourceEntryId: "c", inputTokens: 50, timestampMs: BASE_TS, recordedCost: cost(9, 0, 0, 0) }),
+    ];
+    const result = queryUsage(records, filters({ includeSummaryUsage: true }), 1);
+    const byName = Object.fromEntries(result.byModel.map((entry) => [entry.model, entry]));
+    expect(byName["pair"]!.requestCount).toBe(2);
+    expect(byName["pair"]!.cost.amount).toBe(6);
+    expect(byName["pair"]!.avgCost).toEqual({ amount: 3, status: "recorded", currency: "USD" });
+    // Summary tokens/cost without assistant requests → avg unavailable.
+    expect(byName["summary-only"]!.requestCount).toBe(0);
+    expect(byName["summary-only"]!.cost.amount).toBe(9);
+    expect(byName["summary-only"]!.avgCost).toEqual({ amount: null, status: "unavailable", currency: "USD" });
   });
 });

@@ -59,14 +59,15 @@ export function hitRateBar(rate: number | null, width: number): string {
 }
 
 /**
- * Columns for one character: full-width (CJK) characters count as 2,
- * block-drawing elements (U+2580–U+259F, e.g. trend bars) as 1, everything
- * else ASCII as 1. The CJK test is a rough heuristic (any code point above
- * 0xff counts as full-width); block elements are narrow in every terminal
- * and are the one notable exception.
+ * Columns for one character: full-width (CJK / emoji) characters count as 2,
+ * block-drawing (U+2580–U+259F) and box-drawing (U+2500–U+257F) as 1,
+ * everything else ASCII as 1. The CJK test is a rough heuristic (any code
+ * point above 0xff counts as full-width); terminal line-drawing glyphs are
+ * the notable narrow exceptions.
  */
 function charWidth(ch: string): number {
   const code = ch.codePointAt(0) ?? 0;
+  if (code >= 0x2500 && code <= 0x257f) return 1; // box drawing ┌─┐│└┘ etc.
   if (code >= 0x2580 && code <= 0x259f) return 1; // ▁▂▃▄▅▆▇█ are narrow
   return code > 0xff ? 2 : 1;
 }
@@ -209,4 +210,22 @@ export function timeRangeLabel(range: "today" | "7d" | "30d" | "all"): string {
 /** Display label for the project/global scope. */
 export function scopeLabel(scope: "global" | "project"): string {
   return scope === "project" ? "项目" : "全局";
+}
+
+/**
+ * Wrap content lines in a Unicode rectangular frame. Content is truncated /
+ * padded to `width - 2` so the finished rows are exactly `width` columns.
+ * When `width < 8` the frame is skipped (too narrow for corners + content)
+ * and lines are only truncated to `width`.
+ */
+export function frameLines(lines: readonly string[], width: number): string[] {
+  const w = Number.isFinite(width) ? Math.floor(width) : 0;
+  if (w < 8) {
+    return lines.map((line) => truncateToWidth(line, Math.max(0, w)));
+  }
+  const inner = w - 2;
+  const top = `┌${"─".repeat(inner)}┐`;
+  const bot = `└${"─".repeat(inner)}┘`;
+  const mid = lines.map((line) => `│${padToWidth(truncateToWidth(line, inner), inner)}│`);
+  return [top, ...mid, bot];
 }

@@ -108,6 +108,12 @@ export type ModelUsage = {
   totalTokens: number;
   /** Per-model cost via the same `costDisplay` rules as overall totals. */
   cost: CostDisplay;
+  /**
+   * Average cost per request: `cost.amount / requestCount` when amount is
+   * non-null and requestCount > 0; otherwise unavailable (`--`). Status
+   * matches `cost` when computable.
+   */
+  avgCost: CostDisplay;
 };
 
 /** Shared query contract consumed by both the web API and the TUI. */

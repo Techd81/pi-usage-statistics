@@ -115,13 +115,26 @@ const distinctSorted = (values: string[]): string[] =>
   [...new Set(values.filter((value) => value !== ""))].sort();
 
 /**
+ * Average cost per request for a model row. Computable only when the model
+ * cost amount is non-null and there is at least one finalized request;
+ * otherwise `--` (unavailable). When computable, provenance status matches
+ * the parent `cost` so estimated/mixed markers stay consistent in the UI.
+ */
+export function avgCostDisplay(cost: CostDisplay, requestCount: number): CostDisplay {
+  if (cost.amount !== null && requestCount > 0) {
+    return { amount: cost.amount / requestCount, status: cost.status, currency: COST_CURRENCY };
+  }
+  return { amount: null, status: "unavailable", currency: COST_CURRENCY };
+}
+
+/**
  * Per-model aggregates over the filtered set. `requestCount` counts finalized
  * assistant responses only (same semantics as `totals.requestCount`); summary
  * usage contributes tokens but never requests. `cost` reuses `costDisplay` on
- * that model's records (recorded / estimated / mixed / unavailable). Empty
- * model names are skipped (mirrors the `dimensions` filter). Sorted by
- * requestCount desc, then model name asc — deterministic for tests and stable
- * UI ordering.
+ * that model's records (recorded / estimated / mixed / unavailable). `avgCost`
+ * is `cost.amount / requestCount` when computable. Empty model names are
+ * skipped (mirrors the `dimensions` filter). Sorted by requestCount desc,
+ * then model name asc — deterministic for tests and stable UI ordering.
  */
 function buildByModel(records: readonly UsageRecord[]): ModelUsage[] {
   const byModel = new Map<string, UsageRecord[]>();
@@ -139,7 +152,8 @@ function buildByModel(records: readonly UsageRecord[]): ModelUsage[] {
         if (record.sourceKind === "assistant") requestCount += record.requestCount;
         totalTokens += record.totalTokens;
       }
-      return { model, requestCount, totalTokens, cost: costDisplay(modelRecords) };
+      const cost = costDisplay(modelRecords);
+      return { model, requestCount, totalTokens, cost, avgCost: avgCostDisplay(cost, requestCount) };
     })
     .sort((a, b) => b.requestCount - a.requestCount || a.model.localeCompare(b.model));
 }

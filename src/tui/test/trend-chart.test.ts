@@ -74,6 +74,42 @@ describe("renderTrendChart", () => {
     expect(topPlot).toMatch(/[·:]/);
   });
 
+  it("connects adjacent samples with continuous ink (not only isolated scatter)", () => {
+    // Steep rise: Bresenham fills intermediate rows between samples.
+    const trend = [
+      point({ startMs: 1, inputTokens: 1, totalTokens: 1 }),
+      point({ startMs: 2, inputTokens: 100, totalTokens: 100 }),
+      point({ startMs: 3, inputTokens: 1, totalTokens: 1 }),
+    ];
+    const lines = renderTrendChart(trend, { width: 40, height: 8, colorize: false });
+    const unitsIdx = lines.findIndex((line) => line.includes("cost($)"));
+    const plot = lines.slice(unitsIdx + 1, unitsIdx + 1 + 8).join("");
+    const ink = (plot.match(/[o*+x·]/g) ?? []).length;
+    // Continuous segments paint more than one cell per series endpoint.
+    expect(ink).toBeGreaterThan(6);
+  });
+
+  it("dashed cost series still paints every sample column (including the last)", () => {
+    // Flat cost + plotW=2: a 1-wide Bresenham segment would skip the odd
+    // endpoint if dashed painting omitted atEnd. Legend at width 2 truncates
+    // before the · glyph, so plot-body dots are unambiguous.
+    const trend = [
+      point({ startMs: 1, cost: { amount: 0.1, status: "recorded", currency: "USD" } }),
+      point({ startMs: 2, cost: { amount: 0.1, status: "recorded", currency: "USD" } }),
+    ];
+    const lines = renderTrendChart(trend, { width: 2, height: 3, colorize: false });
+    const plotBody = lines.slice(1).join("");
+    const dots = (plotBody.match(/·/g) ?? []).length;
+    expect(dots).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses a taller default plot height on wide terminals", () => {
+    const narrow = renderTrendChart(sampleTrend(), { width: 30, colorize: false });
+    const wide = renderTrendChart(sampleTrend(), { width: 100, colorize: false });
+    // Wide plot body (excluding legend/units/axis) should be taller.
+    expect(wide.length).toBeGreaterThan(narrow.length);
+  });
+
   it("handles empty trend without throwing", () => {
     const lines = renderTrendChart([], { width: 80, colorize: false });
     const text = lines.join("\n");

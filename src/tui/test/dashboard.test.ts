@@ -1,6 +1,7 @@
 /**
  * Overlay component tests: hero + metric slots + overlay trend main view,
- * models view via `m`, Esc back from models, narrow stacking, and status-line keys.
+ * five-column models view via `m`, outer frame, Esc back from models,
+ * narrow stacking, and status-line keys.
  */
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,13 +63,26 @@ afterEach(() => {
 });
 
 describe("UsageDashboardComponent.render", () => {
-  it("AC1: wide main view shows hero, Requests/Cost, five metric slots, and 使用趋势", async () => {
+  it("AC1: wide main view shows hero, icons, Requests/Cost, five metric slots, 使用趋势, and outer frame", async () => {
     const deps = await makeDeps();
     const component = new UsageDashboardComponent(deps);
     const lines = component.render(120);
     const text = lines.join("\n");
 
+    expect(lines[0]).toMatch(/^┌─+┐$/);
+    expect(lines[lines.length - 1]).toMatch(/^└─+┘$/);
+    expect(lines.some((line) => line.startsWith("│") && line.endsWith("│"))).toBe(true);
+
     expect(text).toContain("Total tokens");
+    expect(text).toContain("📚");
+    expect(text).toContain("📨");
+    expect(text).toContain("💰");
+    expect(text).toContain("📥");
+    expect(text).toContain("📤");
+    expect(text).toContain("💾");
+    expect(text).toContain("📖");
+    expect(text).toContain("⚡");
+    expect(text).toContain("📈");
     expect(text).toContain("Requests");
     expect(text).toContain("Cost");
     expect(text).toContain("Input");
@@ -101,29 +115,126 @@ describe("UsageDashboardComponent.render", () => {
     }
   });
 
-  it("AC2: main view has no model table; m opens four-column models view", async () => {
+  it("AC1/AC2: main view has no model table; m opens five-column models view with separators", async () => {
     const store = await makeManyModelStore(3);
     const component = new UsageDashboardComponent({ store, projectCwd: "/projects/p1" });
     const main = component.render(120).join("\n");
     expect(main).not.toContain("model-01");
-    expect(main).not.toMatch(/\bmodels\s+.*\brequests\s+.*\btokens\s+.*\bcost\b/);
+    expect(main).not.toMatch(/\bModel\b.*\bRequests\b.*\bTokens\b.*\bTotal cost\b.*\bAvg cost\b/);
 
     component.handleInput("m");
     expect(component.currentViewMode).toBe("models");
     const models = component.render(120);
     const text = models.join("\n");
-    const headerLine = models.find((line) => line.includes("models") && line.includes("requests") && line.includes("tokens") && line.includes("cost"));
+    const headerLine = models.find(
+      (line) =>
+        line.includes("Model") &&
+        line.includes("Requests") &&
+        line.includes("Tokens") &&
+        line.includes("Total cost") &&
+        line.includes("Avg cost"),
+    );
     expect(headerLine).toBeDefined();
+    expect(text).toContain("🤖");
     expect(text).toContain("model-01");
     expect(text).toContain("model-03");
     expect(text).toMatch(/\$\d+\.\d{4}/);
+    expect(models.some((line) => /─{8,}/.test(line))).toBe(true);
     // Models view does not render hero / five slots / trend title.
     expect(text).not.toContain("Total tokens");
     expect(text).not.toContain("使用趋势");
+    expect(models[0]).toMatch(/^┌─+┐$/);
+    expect(models[models.length - 1]).toMatch(/^└─+┘$/);
 
     component.handleInput("m");
     expect(component.currentViewMode).toBe("main");
     expect(component.render(120).join("\n")).toContain("Total tokens");
+  });
+
+  it("AC2: models Avg cost shows $ when computable and -- when unavailable", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "pi-tui-avg-"));
+    tempDirs.push(storeDir);
+    const store = new UsageStore({ storeDir });
+    await store.init();
+    const now = Date.now();
+    // Two requests → Total $6.0000, Avg $3.0000.
+    store.upsertRecord(
+      makeRecord({
+        sessionId: "s1",
+        sourceEntryId: "a",
+        model: "paid-pair",
+        timestampMs: now,
+        inputTokens: 10,
+        recordedCost: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+      }),
+    );
+    store.upsertRecord(
+      makeRecord({
+        sessionId: "s1",
+        sourceEntryId: "b",
+        model: "paid-pair",
+        timestampMs: now,
+        inputTokens: 10,
+        recordedCost: { input: 4, output: 0, cacheRead: 0, cacheWrite: 0, total: 4 },
+      }),
+    );
+    // Requests without cost → Total/Avg both `--`.
+    store.upsertRecord(
+      makeRecord({
+        sessionId: "s2",
+        sourceEntryId: "c",
+        model: "no-cost",
+        timestampMs: now,
+        inputTokens: 5,
+      }),
+    );
+
+    const component = new UsageDashboardComponent({ store, projectCwd: "/projects/p1" });
+    component.handleInput("m");
+    const text = component.render(120).join("\n");
+    const paidRow = text.split("\n").find((line) => line.includes("paid-pair"));
+    const freeRow = text.split("\n").find((line) => line.includes("no-cost"));
+    expect(paidRow).toBeDefined();
+    expect(freeRow).toBeDefined();
+    // Total then Avg on the paid row.
+    expect(paidRow!).toMatch(/paid-pair.*\$6\.0000.*\$3\.0000/);
+    // Unavailable cost → `--` for both Total cost and Avg cost.
+    expect(freeRow!).toMatch(/no-cost.*--.*--/);
+  });
+
+  it("AC6: narrow models view keeps every row within width", async () => {
+    const store = await makeManyModelStore(3);
+    const component = new UsageDashboardComponent({ store, projectCwd: "/projects/p1" });
+    component.handleInput("m");
+    for (const width of [40, 10, 5]) {
+      expect(() => component.render(width)).not.toThrow();
+      const lines = component.render(width);
+      for (const line of lines) {
+        expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      }
+      if (width >= 8) {
+        expect(lines[0]).toMatch(/^┌/);
+        expect(lines[lines.length - 1]).toMatch(/^└/);
+      } else {
+        expect(lines[0]).not.toMatch(/^┌/);
+      }
+    }
+  });
+
+  it("emphasizes Cost via theme.selected on the main view", async () => {
+    const deps = await makeDeps();
+    // ANSI wrappers match production themes (zero display width).
+    const theme = {
+      normal: (t: string) => t,
+      selected: (t: string) => `\u001b[1m${t}\u001b[0m`,
+      error: (t: string) => t,
+      muted: (t: string) => t,
+    };
+    const text = new UsageDashboardComponent(deps, theme).render(120).join("\n");
+    // Cost may be `$…` or `--` depending on provenance mix; either is emphasized.
+    expect(text).toMatch(/\u001b\[1m(\$|--)/);
+    expect(text).toMatch(/\u001b\[1m[\d,]+\u001b\[0m/); // hero token count
+    expect(text).toMatch(/\u001b\[1m[\d.]+%\u001b\[0m/); // cache hit %
   });
 
   it("AC4/AC5: narrow stacks vertically, keeps row widths, and shows hit bar or --", async () => {
@@ -141,6 +252,9 @@ describe("UsageDashboardComponent.render", () => {
     expect(inputIdx).toBeGreaterThan(reqIdx);
     expect(hitIdx).toBeGreaterThan(inputIdx);
     expect(trendIdx).toBeGreaterThan(hitIdx);
+    // Narrow uses symbol fallbacks, not wide emoji.
+    expect(text).toContain("# Total tokens");
+    expect(text).not.toContain("📚");
     // No side-by-side model table on main.
     expect(text).not.toContain("claude-sonnet");
     expect(text).not.toContain("gpt-5");
@@ -157,6 +271,15 @@ describe("UsageDashboardComponent.render", () => {
     const lines = new UsageDashboardComponent(deps).render(10);
     for (const line of lines) {
       expect(displayWidth(line)).toBeLessThanOrEqual(10);
+    }
+  });
+
+  it("skips the outer frame when width is below 8", async () => {
+    const deps = await makeDeps();
+    const lines = new UsageDashboardComponent(deps).render(5);
+    expect(lines[0]).not.toMatch(/^┌/);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(5);
     }
   });
 

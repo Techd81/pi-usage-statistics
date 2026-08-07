@@ -12,6 +12,7 @@ import {
   formatDateTimeCompact,
   formatHitRate,
   formatTokens,
+  frameLines,
   hitRateBar,
   padStartToWidth,
   padToWidth,
@@ -96,6 +97,13 @@ describe("displayWidth / truncateToWidth", () => {
     expect(displayWidth("trend ▁▂▃")).toBe(9); // "trend " (6) + 3 bars
   });
 
+  it("counts box-drawing frame glyphs as narrow (1 column)", () => {
+    expect(displayWidth("┌─┐")).toBe(3);
+    expect(displayWidth("│")).toBe(1);
+    expect(displayWidth("└─┘")).toBe(3);
+    expect(displayWidth("─".repeat(10))).toBe(10);
+  });
+
   it("skips ANSI escape sequences when measuring width", () => {
     expect(displayWidth("\u001b[31mred\u001b[0m")).toBe(3);
     expect(displayWidth("\u001b[38;2;255;0;0mred\u001b[0m")).toBe(3);
@@ -177,5 +185,24 @@ describe("trendBar", () => {
     expect(bar[1]).toBe("█");
     expect(bar[0]).toBe("▁");
     expect(bar[2]).toBe("▁");
+  });
+});
+
+describe("frameLines", () => {
+  it("wraps content in a Unicode rectangle at usable widths", () => {
+    const framed = frameLines(["hello", "world"], 12);
+    expect(framed[0]).toBe(`┌${"─".repeat(10)}┐`);
+    expect(framed[1]).toMatch(/^│hello\s+│$/);
+    expect(framed[2]).toMatch(/^│world\s+│$/);
+    expect(framed[framed.length - 1]).toBe(`└${"─".repeat(10)}┘`);
+    for (const line of framed) {
+      expect(displayWidth(line)).toBe(12);
+    }
+  });
+
+  it("degrades to truncation without a frame when too narrow", () => {
+    const lines = frameLines(["abcdefghij"], 5);
+    expect(lines).toEqual(["abcde"]);
+    expect(lines[0]).not.toMatch(/[┌│└]/);
   });
 });
