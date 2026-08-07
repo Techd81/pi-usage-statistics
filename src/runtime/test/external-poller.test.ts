@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UsageStore } from "../../storage";
 import type { FileState } from "../external-poller";
-import { ExternalDataPoller, EXTERNAL_POLL_INTERVAL_MS } from "../external-poller";
+import { ExternalDataPoller, EXTERNAL_POLL_INTERVAL_MS, FORCE_CHECK_EVERY } from "../external-poller";
 
 describe("ExternalDataPoller", () => {
   afterEach(() => {
@@ -148,6 +148,69 @@ describe("ExternalDataPoller", () => {
     state.mtimeMs = 6000;
     await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
     expect(onReloaded).toHaveBeenCalledTimes(1);
+  });
+
+  it("a write landing DURING a reload keeps the pre-reload baseline so the next tick re-detects it", async () => {
+    const { store } = await makeEnv();
+    const onReloaded = vi.fn();
+    const states: (FileState | null)[] = [
+      { mtimeMs: 1000, size: 100 }, // ensureRunning baseline
+      { mtimeMs: 2000, size: 200 }, // tick 1: external write A detected
+      { mtimeMs: 3000, size: 300 }, // post-reload read: write B landed DURING the reload
+      { mtimeMs: 3000, size: 300 }, // tick 2: re-detects write B, reloads
+      { mtimeMs: 3000, size: 300 }, // tick 2 post-reload read: stable -> fast-forward
+      { mtimeMs: 3000, size: 300 }, // tick 3: no change -> silent
+    ];
+    const reader = vi.fn(async (): Promise<FileState | null> => states.shift() ?? null);
+    const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
+    const reloadSpy = vi.spyOn(store, "reloadFromDisk").mockResolvedValue(true);
+
+    vi.useFakeTimers();
+    await poller.ensureRunning();
+
+    // Tick 1: sees write A, reloads; during the reload write B landed, so the
+    // baseline must stay at A -> the next tick re-detects B instead of
+    // fast-forwarding past it.
+    await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+    expect(onReloaded).toHaveBeenCalledTimes(1);
+
+    // Tick 2: re-detects B (baseline was kept at A), reloads, fast-forwards.
+    await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
+    expect(reloadSpy).toHaveBeenCalledTimes(2);
+    expect(onReloaded).toHaveBeenCalledTimes(2);
+
+    // Tick 3: stable file -> silent.
+    await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
+    expect(reloadSpy).toHaveBeenCalledTimes(2);
+    expect(onReloaded).toHaveBeenCalledTimes(2);
+  });
+
+  it("force-checks every FORCE_CHECK_EVERY ticks so stat-missed writes still converge", async () => {
+    const { store } = await makeEnv();
+    const { reader } = makeFakeReader();
+    const onReloaded = vi.fn();
+    const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
+    const reloadSpy = vi.spyOn(store, "reloadFromDisk").mockResolvedValue(true);
+
+    vi.useFakeTimers();
+    await poller.ensureRunning();
+
+    // The file NEVER changes (same mtime/size), yet the force-check must
+    // reload+notify exactly once every FORCE_CHECK_EVERY ticks.
+    for (let tick = 1; tick <= FORCE_CHECK_EVERY; tick++) {
+      await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
+      expect(onReloaded).toHaveBeenCalledTimes(0); // ticks 1..N are plain checks
+    }
+    await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS); // tick N+1: forced
+    expect(onReloaded).toHaveBeenCalledTimes(1);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // Next plain ticks stay silent again until the next force-check.
+    for (let tick = 1; tick <= FORCE_CHECK_EVERY; tick++) {
+      await vi.advanceTimersByTimeAsync(EXTERNAL_POLL_INTERVAL_MS);
+    }
+    expect(onReloaded).toHaveBeenCalledTimes(2);
   });
 
   it("intervalMs is clamped to a sane minimum", async () => {

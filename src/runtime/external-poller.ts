@@ -8,15 +8,26 @@
  * catches up without a restart.
  *
  * - `ensureRunning()` records the current file state as the baseline, then
- *   starts a 2s interval (unref'd so it never keeps the process alive);
+ *   starts a 0.5s interval (unref'd so it never keeps the process alive) so
+ *   cross-window updates land within ~1s (秒级热刷新);
  * - `stop()` cancels the timer;
- * - stat/reload failures are non-fatal (keep the current in-memory state).
+ * - stat/reload failures are non-fatal (keep the current in-memory state);
+ * - every 10th tick force-checks (reloads even when stat reports no change)
+ *   so a filesystem with coarse mtime resolution or a missed event can never
+ *   leave the dashboard stale indefinitely;
+ * - after a reload, the baseline is only fast-forwarded when the file did NOT
+ *   change during the reload; a write landing mid-reload keeps the pre-reload
+ *   baseline so the next tick re-detects and converges instead of skipping
+ *   the record (multi-window lost-update guard).
  */
 import { stat } from "node:fs/promises";
 import type { UsageStore } from "../storage";
 
 /** Default poll interval (ms). stat() is ~microseconds; reload only on change. */
-export const EXTERNAL_POLL_INTERVAL_MS = 2000;
+export const EXTERNAL_POLL_INTERVAL_MS = 500;
+
+/** Force a reload on every Nth tick even when stat() reports no change. */
+export const FORCE_CHECK_EVERY = 10;
 
 export type FileState = { mtimeMs: number; size: number };
 
@@ -49,6 +60,8 @@ export class ExternalDataPoller {
   private pollInFlight: Promise<void> | null = null;
   private pollQueued = false;
   private generation = 0;
+  /** Poll tick counter; drives the periodic force-check. */
+  private tickCount = 0;
 
   constructor(
     store: UsageStore,
@@ -89,6 +102,7 @@ export class ExternalDataPoller {
     }
     this.baseline = null;
     this.pollQueued = false;
+    this.tickCount = 0;
   }
 
   get isRunning(): boolean {
@@ -106,8 +120,14 @@ export class ExternalDataPoller {
       const state = await this.readFileState(this.store.recordsFilePath);
       if (generation !== this.generation) return;
       if (state === null) return; // file gone mid-flight: wait for the next tick
+      // Every FORCE_CHECK_EVERY ticks, treat the state as changed even when
+      // stat() says otherwise. Guarantees convergence on filesystems with
+      // coarse mtime resolution or when a change event was somehow missed.
+      const forceCheck = this.tickCount > 0 && this.tickCount % FORCE_CHECK_EVERY === 0;
+      this.tickCount += 1;
       const changed =
         this.baseline === null ||
+        forceCheck ||
         state.mtimeMs !== this.baseline.mtimeMs ||
         state.size !== this.baseline.size;
       if (!changed) return;
@@ -118,13 +138,29 @@ export class ExternalDataPoller {
         // same change instead of silently dropping it.
         return;
       }
-      // Re-baseline AFTER the reload: reloadFromDisk may flush this process's
-      // own pending records, which rewrites the file (new mtime). Without this
-      // the next tick would see our own write as an external change and loop.
       if (generation !== this.generation || this.timer === null) return;
-      const reloadedState = await this.readFileState(this.store.recordsFilePath).catch(() => null);
+      const afterState = await this.readFileState(this.store.recordsFilePath).catch(() => null);
       if (generation !== this.generation || this.timer === null) return;
-      this.baseline = reloadedState ?? state;
+      // Re-baseline decision:
+      // - reloadFromDisk may flush THIS process's own pending records, which
+      //   rewrites the file (new mtime). Without a fast-forward, the next tick
+      //   would see our own write as an external change and loop.
+      // - BUT if the file changed while we were reloading (another process
+      //   wrote mid-flight), our load() may have missed the newest bytes.
+      //   Fast-forwarding would then skip that record forever. Keep the
+      //   PRE-reload baseline so the next tick re-detects and converges.
+      if (afterState === null) {
+        // File vanished mid-reload: re-check from the pre-reload state.
+        this.baseline = state;
+      } else if (afterState.mtimeMs === state.mtimeMs && afterState.size === state.size) {
+        // No write landed during the reload — safe to fast-forward.
+        this.baseline = afterState;
+      } else {
+        // A write landed during the reload: keep the pre-reload baseline.
+        // The next tick re-detects and picks up the record we may have
+        // missed. At most one redundant reload settles the self-write case.
+        this.baseline = state;
+      }
       try {
         this.onReloaded();
       } catch {
