@@ -25,12 +25,14 @@ import type { UsageFilters, UsageQueryResult } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
 import {
+  centerInWidth,
   displayWidth,
   formatCompactTokens,
   formatCost,
   formatDateRange,
   formatHitRate,
   formatTokens,
+  forceWidth,
   frameLines,
   hitRateBar,
   padStartToWidth,
@@ -40,6 +42,7 @@ import {
   truncateToWidth,
 } from "./format";
 import { renderTrendChart } from "./trend-chart";
+import { renderTitleBanner } from "./title-banner";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
@@ -260,8 +263,11 @@ export class UsageDashboardComponent {
     return framed ? frameLines(capped, w) : capped;
   }
 
-  /** Default main view: hero + metric slots + usage trend (no model table). */
+  /** Default main view: title banner + hero + metric slots + usage trend. */
   private renderMainView(lines: string[], result: UsageQueryResult, width: number, wide: boolean): void {
+    const banner = renderTitleBanner(width).map((line) => this.theme.selected(line));
+    lines.push(...banner);
+    if (banner.length > 0) lines.push("");
     if (!wide) {
       this.renderMainNarrow(lines, result, width);
     } else {
@@ -401,9 +407,9 @@ export class UsageDashboardComponent {
       if (displayWidth(colored) <= w) {
         return colored + " ".repeat(Math.max(0, w - displayWidth(colored)));
       }
-      return truncateToWidth(colored, w) || this.theme.normal(plainBudget);
+      return forceWidth(colored, w) || this.theme.normal(plainBudget);
     });
-    return [this.theme.muted(labelRow), valueCells.join("")];
+    return [forceWidth(this.theme.muted(labelRow), width), forceWidth(valueCells.join(""), width)];
   }
 
   /** Full-width five-column per-model table with horizontal separators. */
@@ -420,7 +426,7 @@ export class UsageDashboardComponent {
 
   /**
    * Per-model table: Model / Requests / Tokens / Total cost / Avg cost.
-   * Model left-aligned; numeric columns right-aligned; row separators.
+   * Columns separated by │; model left-aligned; numeric columns right-aligned.
    */
   private modelLines(result: UsageQueryResult, width: number, withHeader: boolean, wide: boolean): string[] {
     const models = result.byModel;
@@ -432,6 +438,8 @@ export class UsageDashboardComponent {
     const tokHeader = withIcon(ICONS.totalTokens, "Tokens", wide);
     const totalHeader = withIcon(ICONS.cost, "Total cost", wide);
     const avgHeader = "Avg cost";
+    const colSep = "│";
+    const sepCount = 4;
 
     const reqMax = Math.max(
       displayWidth(reqHeader),
@@ -449,20 +457,33 @@ export class UsageDashboardComponent {
       displayWidth(avgHeader),
       ...models.map((entry) => displayWidth(formatCost(entry.avgCost))),
     );
-    const gap = 2;
-    const reserved = reqMax + tokMax + costMax + avgMax + gap * 4;
+    const reserved = reqMax + tokMax + costMax + avgMax + displayWidth(colSep) * sepCount;
     const longestName = Math.max(displayWidth(modelHeader), ...models.map((entry) => displayWidth(entry.model)));
     const nameMax = Math.max(6, Math.min(longestName, Math.max(6, width - reserved)));
 
-    const separator = truncateToWidth("─".repeat(Math.max(0, width)), width);
+    const rule =
+      "─".repeat(nameMax) +
+      "┼" +
+      "─".repeat(reqMax) +
+      "┼" +
+      "─".repeat(tokMax) +
+      "┼" +
+      "─".repeat(costMax) +
+      "┼" +
+      "─".repeat(avgMax);
+    const separator = truncateToWidth(rule, width);
 
     const formatRow = (name: string, req: string, tok: string, total: string, avg: string): string =>
       truncateToWidth(
         padToWidth(name, nameMax) +
-          padStartToWidth(req, reqMax + gap) +
-          padStartToWidth(tok, tokMax + gap) +
-          padStartToWidth(total, costMax + gap) +
-          padStartToWidth(avg, avgMax + gap),
+          colSep +
+          padStartToWidth(req, reqMax) +
+          colSep +
+          padStartToWidth(tok, tokMax) +
+          colSep +
+          padStartToWidth(total, costMax) +
+          colSep +
+          padStartToWidth(avg, avgMax),
         width,
       );
 
@@ -482,7 +503,6 @@ export class UsageDashboardComponent {
           formatCost(entry.avgCost),
         ),
       );
-      // Row separators only between body rows (行间), not after the last.
       if (i < models.length - 1) lines.push(separator);
     }
     return lines;
@@ -503,8 +523,8 @@ export class UsageDashboardComponent {
         ? result.filters.toMs
         : (result.trend[result.trend.length - 1]?.startMs ?? result.filters.toMs);
     const range = formatDateRange(fromMs, toMs);
-    const title = truncateToWidth(`${withIcon(ICONS.trend, "使用趋势", wide)}  ${range}`, width);
-    lines.push(this.theme.selected(title));
+    const titlePlain = `${withIcon(ICONS.trend, "使用趋势", wide)}  ${range}`;
+    lines.push(this.theme.selected(centerInWidth(titlePlain, width)));
     // Noop theme in tests: skip ANSI so structural asserts stay stable.
     const colorize = this.theme !== noopTheme;
     for (const row of renderTrendChart(result.trend, { width, colorize })) {

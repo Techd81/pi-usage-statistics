@@ -8,6 +8,7 @@
  */
 import type { TrendPoint } from "../domain";
 import {
+  centerInWidth,
   displayWidth,
   formatCompactTokens,
   formatDateTimeCompact,
@@ -174,18 +175,18 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
 
   const lines: string[] = [];
 
-  // Legend: Cost(·$) · Cache write(+) · … — glyph+$ cues dual scale.
+  // Legend: Cost(·$) · Cache write(+) · … — centered; glyph+$ cues dual scale.
   const legendParts = LEGEND_ORDER.map((name) => {
     const spec = SERIES.find((s) => s.legend === name)!;
     const unit = spec.scale === "cost" ? `${spec.glyph}$` : spec.glyph;
     const label = `${name}(${unit})`;
     return colorize ? `${spec.ansi}${label}${RESET}` : label;
   });
-  lines.push(truncateToWidth(legendParts.join("  "), width));
+  lines.push(centerInWidth(legendParts.join("  "), width));
 
-  const unitsCue = "tokens ← | → cost($)";
+  const unitsCue = "tokens <- | -> cost($)";
   if (width >= displayWidth(unitsCue) + 2) {
-    lines.push(truncateToWidth(unitsCue, width));
+    lines.push(centerInWidth(unitsCue, width));
   }
 
   if (trend.length === 0) {

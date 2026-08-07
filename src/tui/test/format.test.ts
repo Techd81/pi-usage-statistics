@@ -5,7 +5,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  centerInWidth,
   displayWidth,
+  forceWidth,
   formatCompactTokens,
   formatCost,
   formatDateRange,
@@ -133,11 +135,11 @@ describe("displayWidth / truncateToWidth", () => {
 });
 
 describe("padToWidth / padStartToWidth", () => {
-  it("pads to an exact visible width and leaves already-wide text unchanged", () => {
+  it("pads to an exact visible width and truncates when already wider", () => {
     expect(padToWidth("ab", 5)).toBe("ab   ");
     expect(padStartToWidth("ab", 5)).toBe("   ab");
-    expect(padToWidth("abcdef", 4)).toBe("abcdef");
-    expect(padStartToWidth("abcdef", 4)).toBe("abcdef");
+    expect(padToWidth("abcdef", 4)).toBe("abcd");
+    expect(padStartToWidth("abcdef", 4)).toBe("abcd");
     expect(padToWidth("x", 0)).toBe("");
     expect(padStartToWidth("x", 0)).toBe("");
   });
@@ -149,6 +151,15 @@ describe("padToWidth / padStartToWidth", () => {
     expect(displayWidth(padStartToWidth(colored, 5))).toBe(5);
     expect(padToWidth("中", 4)).toBe("中  ");
     expect(padStartToWidth("中", 4)).toBe("  中");
+  });
+});
+
+describe("centerInWidth / forceWidth", () => {
+  it("centers text and forceWidth always matches the target columns", () => {
+    expect(centerInWidth("ab", 6)).toBe("  ab  ");
+    expect(centerInWidth("abc", 6)).toBe(" abc  ");
+    expect(displayWidth(forceWidth("hello world", 5))).toBe(5);
+    expect(forceWidth("hi", 5)).toBe("hi   ");
   });
 });
 
@@ -204,5 +215,13 @@ describe("frameLines", () => {
     const lines = frameLines(["abcdefghij"], 5);
     expect(lines).toEqual(["abcde"]);
     expect(lines[0]).not.toMatch(/[┌│└]/);
+  });
+
+  it("keeps right border attached when content would otherwise overflow", () => {
+    const framed = frameLines(["x".repeat(50), "\u001b[31m" + "宽".repeat(20) + "\u001b[0m"], 20);
+    for (const line of framed) {
+      expect(displayWidth(line)).toBe(20);
+      expect(line.endsWith("┐") || line.endsWith("┘") || line.endsWith("│")).toBe(true);
+    }
   });
 });

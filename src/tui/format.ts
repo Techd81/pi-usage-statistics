@@ -95,27 +95,49 @@ export function displayWidth(text: string): number {
 }
 
 /**
- * Pad (or leave as-is) so the visible display width is exactly `width`.
- * ANSI escape sequences count as zero columns. When the text is already
- * wider than `width`, it is returned unchanged — callers should truncate
- * first when a hard cap is required.
+ * Force visible display width to exactly `width`: truncate first, then pad.
+ * Never returns a string wider than `width` (ANSI counts as zero columns).
+ * Use this before framing so the right border never wraps to the next line.
  */
-export function padToWidth(text: string, width: number): string {
+export function forceWidth(text: string, width: number): string {
   if (width <= 0) return "";
-  const current = displayWidth(text);
-  if (current >= width) return text;
-  return text + " ".repeat(width - current);
+  return padToWidth(truncateToWidth(text, width), width);
 }
 
 /**
- * Left-pad so the visible display width is exactly `width`. Same ANSI
- * accounting as `padToWidth`.
+ * Pad so the visible display width is exactly `width`. If already wider,
+ * truncates first (same as `forceWidth`) so callers never leak overflow
+ * into the outer frame.
+ */
+export function padToWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  const clipped = displayWidth(text) > width ? truncateToWidth(text, width) : text;
+  const current = displayWidth(clipped);
+  if (current >= width) return clipped;
+  return clipped + " ".repeat(width - current);
+}
+
+/**
+ * Left-pad so the visible display width is exactly `width`. Truncates when
+ * already wider (same overflow guard as `padToWidth`).
  */
 export function padStartToWidth(text: string, width: number): string {
   if (width <= 0) return "";
-  const current = displayWidth(text);
-  if (current >= width) return text;
-  return " ".repeat(width - current) + text;
+  const clipped = displayWidth(text) > width ? truncateToWidth(text, width) : text;
+  const current = displayWidth(clipped);
+  if (current >= width) return clipped;
+  return " ".repeat(width - current) + clipped;
+}
+
+/**
+ * Center `text` within `width` columns (truncate first, then equal pad).
+ */
+export function centerInWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  const clipped = truncateToWidth(text, width);
+  const pad = Math.max(0, width - displayWidth(clipped));
+  const left = Math.floor(pad / 2);
+  return " ".repeat(left) + clipped + " ".repeat(pad - left);
 }
 
 /**
@@ -226,6 +248,8 @@ export function frameLines(lines: readonly string[], width: number): string[] {
   const inner = w - 2;
   const top = `┌${"─".repeat(inner)}┐`;
   const bot = `└${"─".repeat(inner)}┘`;
-  const mid = lines.map((line) => `│${padToWidth(truncateToWidth(line, inner), inner)}│`);
+  // forceWidth guarantees each body row is exactly `inner` columns so the
+  // trailing border never wraps when content overflowed.
+  const mid = lines.map((line) => `│${forceWidth(line, inner)}│`);
   return [top, ...mid, bot];
 }

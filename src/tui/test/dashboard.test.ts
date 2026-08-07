@@ -98,8 +98,21 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("Cache read(*)");
     expect(text).toContain("Input(o)");
     expect(text).toContain("Output(x)");
-    expect(text).toContain("tokens ← | → cost($)");
+    expect(text).toContain("tokens <- | -> cost($)");
     expect(text).not.toMatch(/\btotal\(/i);
+    // Artistic title on hero page.
+    expect(text).toMatch(/Pi Usage|Ｐｉ|___/);
+    // Trend title + legend are centered (leading spaces before 使用趋势 / Cost).
+    const trendLine = lines.find((line) => line.includes("使用趋势"));
+    expect(trendLine).toBeDefined();
+    expect(trendLine!.replace(/^\│/, "").search(/\S/)).toBeGreaterThan(1);
+    const legendLine = lines.find((line) => line.includes("Cost(·$)") && line.includes("Output(x)"));
+    expect(legendLine).toBeDefined();
+    expect(legendLine!.replace(/^\│/, "").search(/\S/)).toBeGreaterThan(1);
+    // Every framed body row is exactly `width` columns (no wrapped right border).
+    for (const line of lines) {
+      expect(displayWidth(line)).toBe(120);
+    }
     // Compact hero subtitle.
     expect(text).toMatch(/~\s+\d/);
     // Non-null hit rate shows percent + block bar on the wide Cache hit slot.
@@ -135,11 +148,13 @@ describe("UsageDashboardComponent.render", () => {
         line.includes("Avg cost"),
     );
     expect(headerLine).toBeDefined();
+    expect(headerLine!).toMatch(/Model.*│.*Requests.*│.*Tokens.*│.*Total cost.*│.*Avg cost/);
+    expect(text).toContain("┼");
     expect(text).toContain("🤖");
     expect(text).toContain("model-01");
     expect(text).toContain("model-03");
     expect(text).toMatch(/\$\d+\.\d{4}/);
-    expect(models.some((line) => /─{8,}/.test(line))).toBe(true);
+    expect(models.some((line) => /─{3,}┼─{3,}/.test(line))).toBe(true);
     // Models view does not render hero / five slots / trend title.
     expect(text).not.toContain("Total tokens");
     expect(text).not.toContain("使用趋势");
