@@ -17,12 +17,18 @@ import type { UsageFilters, UsageQueryResult } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { ScanSummary, UsageStore } from "../storage";
 import { formatCompactSummary, formatScanSummary } from "./format";
-import type { Scope } from "../tui/dashboard";
+import type { OverlayDeps, Scope } from "../tui/dashboard";
 
 export type { Scope } from "../tui/dashboard";
 
 export type CommandDependencies = {
   store: UsageStore;
+  /**
+   * Live-update subscription source (extension factory): register a listener
+   * invoked when a new record arrives; returns an unsubscribe function.
+   * Optional so print-only/test callers keep working without TUI wiring.
+   */
+  subscribeLive?: (listener: () => void) => () => void;
 };
 
 const DEFAULT_FILTERS = (): UsageFilters => ({
@@ -134,9 +140,9 @@ async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommand
   try {
     const { makeOverlayFactory } = await import("../tui/dashboard");
     const cwd = projectCwd(ctx);
-    await ctx.ui.custom(
-      makeOverlayFactory({ store: deps.store, projectCwd: cwd, initialScope: scope }),
-    );
+    const overlayDeps: OverlayDeps = { store: deps.store, projectCwd: cwd, initialScope: scope };
+    if (deps.subscribeLive) overlayDeps.subscribeLive = deps.subscribeLive;
+    await ctx.ui.custom(makeOverlayFactory(overlayDeps));
   } catch (error) {
     presentError(ctx, "tui", error);
   }

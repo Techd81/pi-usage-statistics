@@ -27,6 +27,7 @@ import type { UsageFilters } from "../../domain";
 import { DEFAULT_BUCKET_MS } from "../../domain";
 import usageStatsExtension from "../../extension";
 import { UsageStore } from "../../storage";
+import { LIVE_REFRESH_DEBOUNCE_MS, UsageDashboardComponent } from "../../tui/dashboard";
 
 // --- Mock the Pi runtime module (isolation for store dir + scanner) --------
 
@@ -403,6 +404,71 @@ describe("/pi-usage-statistics command", () => {
     await handler("", tuiCtx);
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  it("TC6: an open dashboard hot-updates on message_end (debounced) and unsubscribes on close", async () => {
+    const store = await makeStore();
+    const { api, handlers, commands } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const handler = usageStatsCommand(commands);
+    const ctx = makeCtx({ mode: "tui" });
+
+    // One message before the dashboard opens.
+    await fire(handlers, assistantMessageEndEvent("resp-0", { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 }), ctx);
+
+    // Open the dashboard: the custom() mock materializes the component so the
+    // factory's live subscription is active.
+    let component: UsageDashboardComponent | undefined;
+    const requestRender = vi.fn();
+    (ctx.ui as { custom: unknown }).custom = vi.fn(async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: null) => void) => UsageDashboardComponent) => {
+      component = factory({ requestRender }, null, {}, () => {});
+    });
+    await handler("", ctx);
+    expect(component).toBeDefined();
+    // Cycle to 全部 so the fixed 1_700_000_000_000 event timestamps are in range.
+    for (let i = 0; i < 6; i++) component!.handleInput("t");
+    expect(component!.render(80).join("\n")).toContain("150"); // 100 input + 50 output
+
+    // A new record while the dashboard is open: debounced refresh kicks in.
+    vi.useFakeTimers();
+    await fire(handlers, assistantMessageEndEvent("resp-1", { input: 200, output: 100, cacheRead: 0, cacheWrite: 0 }), ctx);
+    expect(component!.render(80).join("\n")).toContain("150"); // not yet refreshed
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(component!.render(80).join("\n")).toContain("450"); // 150 + 300
+    expect(requestRender).toHaveBeenCalled();
+
+    // Esc closes and unsubscribes: further events stop refreshing the closed component.
+    component!.handleInput("\u001b");
+    const closedRender = component!.render(80).join("\n");
+    await fire(handlers, assistantMessageEndEvent("resp-2", { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }), ctx);
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(component!.render(80).join("\n")).toBe(closedRender);
+    vi.useRealTimers();
+  });
+
+  it("TC7: collector failure does not hot-refresh the open dashboard (no record) and never escapes", async () => {
+    const brokenStore = new ThrowingStore({ storeDir, sessionDir });
+    const { api, handlers, commands } = makeHarness();
+    usageStatsExtension(api, { store: brokenStore, scanDebounceMs: 1_000_000 });
+    const handler = usageStatsCommand(commands);
+    const ctx = makeCtx({ mode: "tui" });
+
+    let component: UsageDashboardComponent | undefined;
+    const requestRender = vi.fn();
+    (ctx.ui as { custom: unknown }).custom = vi.fn(async (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: null) => void) => UsageDashboardComponent) => {
+      component = factory({ requestRender }, null, {}, () => {});
+    });
+    await handler("", ctx);
+    expect(component).toBeDefined();
+
+    vi.useFakeTimers();
+    await expect(fire(handlers, assistantMessageEndEvent("boom", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }), ctx)).resolves.toBeUndefined();
+    expect(vi.mocked(ctx.ui.notify)).toHaveBeenCalledWith(expect.stringContaining("collect usage failed"), "error");
+    // Nothing was collected, so the open dashboard must NOT be scheduled for refresh.
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(requestRender).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    component!.dispose();
   });
 
 });

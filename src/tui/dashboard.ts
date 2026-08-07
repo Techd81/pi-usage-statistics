@@ -73,6 +73,12 @@ export type OverlayDeps = {
   store: UsageStore;
   projectCwd: string;
   initialScope?: Scope;
+  /**
+   * Live-update source: register a listener invoked when a new usage record
+   * arrives (message_end). Returns an unsubscribe function. When absent the
+   * dashboard renders on demand only (keys / open) — no hot updates.
+   */
+  subscribeLive?: (listener: () => void) => () => void;
 };
 
 /** Presentation state driving the overlay; the component owns data loading. */
@@ -160,9 +166,17 @@ const iconFor = (pair: IconPair, wide: boolean): string => (wide ? pair.emoji : 
 
 const withIcon = (pair: IconPair, label: string, wide: boolean): string => `${iconFor(pair, wide)} ${label}`;
 
+/** Debounce window for live updates: bursts of message_end coalesce into one refresh. */
+export const LIVE_REFRESH_DEBOUNCE_MS = 300;
+
 /**
  * Embedded usage dashboard. Key bindings:
  * `p`/`g` scope, `m` models view, `t` time range, `Esc` back/close.
+ *
+ * Live updates: when `deps.subscribeLive` is provided, each new record
+ * (message_end) schedules a debounced refresh + re-render so the visible
+ * numbers track the running session; the subscription and any pending timer
+ * are released on close (Esc).
  */
 export class UsageDashboardComponent {
   private state: OverlayState = { kind: "loading" };
@@ -170,6 +184,8 @@ export class UsageDashboardComponent {
   private timeRange: TimeRange = "today";
   private viewMode: ViewMode = "main";
   private completed = false;
+  private liveTimer: ReturnType<typeof setTimeout> | null = null;
+  private unsubscribeLive: (() => void) | null = null;
   constructor(
     private readonly deps: OverlayDeps,
     private readonly theme: DashboardTheme = noopTheme,
@@ -178,6 +194,7 @@ export class UsageDashboardComponent {
   ) {
     this.scope = deps.initialScope ?? "global";
     this.refresh();
+    this.subscribeLive();
   }
 
   get currentScope(): Scope {
@@ -200,6 +217,39 @@ export class UsageDashboardComponent {
     } catch (error) {
       this.state = { kind: "error", message: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /**
+   * Register the live-update listener: each new record schedules a debounced
+   * refresh (bursts coalesce); the listener self-guards against a closed
+   * component and is unsubscribed on close (Esc) via {@link dispose}.
+   */
+  private subscribeLive(): void {
+    if (!this.deps.subscribeLive) return;
+    const handler = (): void => {
+      if (this.completed) return; // closed overlay must not re-arm timers
+      if (this.liveTimer !== null) return; // already debouncing
+      this.liveTimer = setTimeout(() => {
+        this.liveTimer = null;
+        this.refresh();
+        this.requestRender();
+      }, LIVE_REFRESH_DEBOUNCE_MS);
+    };
+    this.unsubscribeLive = this.deps.subscribeLive(handler);
+  }
+
+  /**
+   * Release live-update resources: cancel the pending timer and unsubscribe.
+   * Public so Pi's Component lifecycle can call it on programmatic teardown
+   * (session switch etc.), not only on user Esc.
+   */
+  dispose(): void {
+    if (this.liveTimer !== null) {
+      clearTimeout(this.liveTimer);
+      this.liveTimer = null;
+    }
+    this.unsubscribeLive?.();
+    this.unsubscribeLive = null;
   }
 
   handleInput(data: string): void {
@@ -236,6 +286,7 @@ export class UsageDashboardComponent {
         }
         if (!this.completed) {
           this.completed = true;
+          this.dispose();
           this.onDone();
         }
         break;

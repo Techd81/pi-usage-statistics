@@ -17,6 +17,7 @@
  * (spec/typescript/error-handling.md).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { UsageRecord } from "./domain";
 import { UsageStore } from "./storage";
 import { collectMessageEnd } from "./runtime/collector";
 import { runUsageStatsCommand } from "./runtime/commands";
@@ -35,6 +36,30 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
   const store: UsageStore = options.store ?? new UsageStore();
   const scanDebounceMs = options.scanDebounceMs ?? DEFAULT_SCAN_DEBOUNCE_MS;
   let lastCtx: ExtensionContext | undefined;
+
+  /**
+   * Live-dashboard subscribers: while a `/pi-usage-statistics` overlay is
+   * open, its component registers a listener here so `message_end` can
+   * trigger a debounced refresh (hot update). Each listener is isolated —
+   * one broken subscriber can never break collection or Pi.
+   */
+  const liveListeners = new Set<() => void>();
+  const subscribeLive = (listener: () => void): (() => void) => {
+    liveListeners.add(listener);
+    return () => {
+      liveListeners.delete(listener);
+    };
+  };
+
+  const notifyLiveListeners = (): void => {
+    for (const listener of [...liveListeners]) {
+      try {
+        listener();
+      } catch {
+        // A subscriber refresh failure must never escape into Pi.
+      }
+    }
+  };
 
   const notifyError = (ctx: ExtensionContext | undefined, action: string, error: unknown): void => {
     const detail = error instanceof Error ? error.message : String(error);
@@ -67,11 +92,15 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
   });
 
   pi.on("message_end", (event, ctx) => {
+    let collected: UsageRecord | null = null;
     try {
-      collectMessageEnd(store, event, ctx);
+      collected = collectMessageEnd(store, event, ctx);
     } catch (error) {
       notifyError(ctx, "collect usage", error);
     }
+    // Hot update: only messages that actually stored a record trigger a
+    // (debounced) dashboard refresh — non-countable messages stay silent.
+    if (collected) notifyLiveListeners();
   });
 
   pi.on("model_select", (_event, _ctx) => {
@@ -97,6 +126,6 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
   pi.registerCommand("pi-usage-statistics", {
     description:
       "Token usage statistics (TUI). Optional argument: project | global (scope). No argument defaults to global.",
-    handler: (args, ctx) => runUsageStatsCommand({ store }, args, ctx),
+    handler: (args, ctx) => runUsageStatsCommand({ store, subscribeLive }, args, ctx),
   });
 }

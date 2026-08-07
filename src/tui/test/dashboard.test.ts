@@ -7,7 +7,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeOverlayFactory, UsageDashboardComponent, type OverlayDeps } from "../dashboard";
+import { LIVE_REFRESH_DEBOUNCE_MS, makeOverlayFactory, noopTheme, UsageDashboardComponent, type OverlayDeps } from "../dashboard";
 import { displayWidth } from "../format";
 import { UsageStore } from "../../storage";
 import { makeRecord } from "../../storage/test/helpers";
@@ -501,5 +501,101 @@ describe("makeOverlayFactory", () => {
     const factory = makeOverlayFactory(deps);
     const component = factory({ requestRender: () => {} }, null, {}, vi.fn());
     expect(() => component.render(80)).not.toThrow();
+  });
+});
+
+describe("live updates (subscribeLive)", () => {
+  /** Fake subscription registry; returns the captured listener + an unsubscribe spy. */
+  const makeLiveDeps = async (): Promise<{
+    deps: OverlayDeps;
+    listeners: Set<() => void>;
+    unsubscribe: ReturnType<typeof vi.fn>;
+  }> => {
+    const deps = await makeDeps();
+    const listeners = new Set<() => void>();
+    const unsubscribe = vi.fn(() => undefined);
+    deps.subscribeLive = (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        unsubscribe();
+      };
+    };
+    return { deps, listeners, unsubscribe };
+  };
+
+  it("R1: a new record refreshes visible totals after the debounce window", async () => {
+    vi.useFakeTimers();
+    const { deps, listeners } = await makeLiveDeps();
+    const component = new UsageDashboardComponent(deps);
+    for (let i = 0; i < 6; i++) component.handleInput("t"); // → 全部
+    // makeStore seeds p1 (100+50+20+10=180) + p2 (300+150=450) → 630.
+    expect(component.render(120).join("\n")).toContain("630");
+
+    // A new record arrives (message_end would upsert + notify): 200+100+30+20=350.
+    deps.store.upsertRecord(
+      makeRecord({ sessionId: "s3", sourceEntryId: "e1", projectCwd: "/projects/p1", timestampMs: Date.now(), inputTokens: 200, outputTokens: 100, cacheReadTokens: 30, cacheWriteTokens: 20 }),
+    );
+    for (const listener of listeners) listener();
+    // Not yet refreshed — totals still show the pre-event snapshot.
+    expect(component.render(120).join("\n")).toContain("630");
+    expect(component.render(120).join("\n")).not.toContain("980");
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    // 630 + 350 = 980 — hot update visible after the debounce.
+    expect(component.render(120).join("\n")).toContain("980");
+    vi.useRealTimers();
+  });
+
+  it("R2: bursts within the window coalesce into a single refresh", async () => {
+    vi.useFakeTimers();
+    const { deps, listeners } = await makeLiveDeps();
+    const requestRender = vi.fn();
+    const component = new UsageDashboardComponent(deps, noopTheme, () => {}, requestRender);
+    for (let i = 0; i < 5; i++) for (const listener of listeners) listener();
+    expect(requestRender).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+    component.dispose();
+  });
+
+  it("R3: Esc unsubscribes, cancels the pending timer, and a closed component ignores events", async () => {
+    vi.useFakeTimers();
+    const { deps, listeners, unsubscribe } = await makeLiveDeps();
+    let captured: (() => void) | undefined;
+    deps.subscribeLive = (listener) => {
+      captured = listener;
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        unsubscribe();
+      };
+    };
+    const requestRender = vi.fn();
+    const done = vi.fn();
+    const component = new UsageDashboardComponent(deps, noopTheme, done, requestRender);
+    // Arm a pending refresh, then close before it fires.
+    captured!();
+    component.handleInput("\u001b");
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(requestRender).not.toHaveBeenCalled(); // pending timer was cancelled
+    // A stray event after close must not re-arm anything.
+    captured!();
+    vi.advanceTimersByTime(LIVE_REFRESH_DEBOUNCE_MS);
+    expect(requestRender).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("R4: components without subscribeLive behave exactly as before (no hot updates)", async () => {
+    const deps = await makeDeps(); // no subscribeLive
+    const component = new UsageDashboardComponent(deps);
+    for (let i = 0; i < 6; i++) component.handleInput("t");
+    const before = component.render(120).join("\n");
+    deps.store.upsertRecord(
+      makeRecord({ sessionId: "s4", sourceEntryId: "e1", projectCwd: "/projects/p1", timestampMs: Date.now(), inputTokens: 999 }),
+    );
+    expect(component.render(120).join("\n")).toBe(before); // no live listener → unchanged
   });
 });
