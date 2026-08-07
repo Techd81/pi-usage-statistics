@@ -432,3 +432,56 @@ describe("pathsMatch / normalizePath (D3 路径归一化)", () => {
     }
   });
 });
+
+describe("非有限时间戳防御（R1：buildTrend 不得死循环/OOM）", () => {
+  const hostile = (ts: number, i: number) =>
+    makeRecord({ timestampMs: ts, inputTokens: 100, sourceEntryId: `hostile-${i}` });
+
+  it("全部范围 + -Infinity 记录：立即返回，不挂起，趋势有限", () => {
+    const now = Date.now();
+    const records = [
+      hostile(Number.NEGATIVE_INFINITY, 0),
+      hostile(now - 60_000, 1),
+      hostile(now, 2),
+    ];
+    const result = queryUsage(records, filters({ fromMs: 0, toMs: now }), now);
+    // -Infinity 被 matches() 排除，不进入任何聚合
+    expect(result.totals.requestCount).toBe(2);
+    expect(result.trend.length).toBeLessThanOrEqual(MAX_TREND_BUCKETS);
+    expect(Array.isArray(result.trend)).toBe(true);
+  });
+
+  it("全部记录时间戳均为非有限：返回空趋势与零总量", () => {
+    const records = [
+      hostile(Number.NaN, 0),
+      hostile(Number.POSITIVE_INFINITY, 1),
+      hostile(Number.NEGATIVE_INFINITY, 2),
+    ];
+    const result = queryUsage(records, filters({ fromMs: 0, toMs: Number.POSITIVE_INFINITY }), Date.now());
+    expect(result.trend).toEqual([]);
+    expect(result.totals.requestCount).toBe(0);
+    expect(result.totals.totalTokens).toBe(0);
+  });
+
+  it("NaN 时间戳不污染有界范围聚合", () => {
+    const now = Date.now();
+    const records = [hostile(Number.NaN, 0), hostile(now - 5_000, 1)];
+    const result = queryUsage(records, filters({ fromMs: now - 60_000, toMs: now }), now);
+    expect(result.totals.requestCount).toBe(1);
+    expect(result.trend.length).toBeGreaterThanOrEqual(1);
+    // 趋势桶 token 总和 = 过滤后总量（守恒）
+    const sum = result.trend.reduce((acc, p) => acc + p.totalTokens, 0);
+    expect(sum).toBe(result.totals.totalTokens);
+  });
+
+  it("合法数据的趋势守恒不受防御影响（回归）", () => {
+    const now = Date.now();
+    const records = Array.from({ length: 120 }, (_, i) =>
+      makeRecord({ timestampMs: now - (120 - i) * 60_000, inputTokens: i % 9, sourceEntryId: `safe-${i}` }),
+    );
+    const result = queryUsage(records, filters({ fromMs: 0, toMs: now }), now);
+    const sum = result.trend.reduce((acc, p) => acc + p.totalTokens, 0);
+    expect(sum).toBe(result.totals.totalTokens);
+    expect(result.trend.length).toBeGreaterThan(0);
+  });
+});

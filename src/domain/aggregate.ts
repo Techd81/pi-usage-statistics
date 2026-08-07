@@ -76,6 +76,9 @@ export function pathsMatch(a: string, b: string): boolean {
 
 const matches = (record: UsageRecord, filters: UsageFilters): boolean => {
   if (record.sourceKind === "summary" && !filters.includeSummaryUsage) return false;
+  // 非有限时间戳没有有意义的窗口语义：NaN/±Infinity 与任何边界比较都为 false，
+  // 会静默“通过”过滤并污染聚合；显式排除后行为确定（存储层已保证合法数据有限）。
+  if (!Number.isFinite(record.timestampMs)) return false;
   if (record.timestampMs < filters.fromMs || record.timestampMs > filters.toMs) return false;
   if ((filters.providers?.length ?? 0) > 0 && !filters.providers!.includes(record.provider)) return false;
   if ((filters.models?.length ?? 0) > 0 && !filters.models!.includes(record.model)) return false;
@@ -223,17 +226,21 @@ function buildTrend(records: readonly UsageRecord[], filters: UsageFilters): Tre
   let lower = Number.isFinite(filters.fromMs) ? filters.fromMs : 0;
   if (lower <= 0) {
     if (records.length === 0) return [];
-    lower = records[0]!.timestampMs;
-    for (let i = 1; i < records.length; i++) {
-      const ts = records[i]!.timestampMs;
-      if (ts < lower) lower = ts;
+    // 取最小有限时间戳作为窗口起点；全部为非有限值时无趋势可画。
+    // （matches() 已排除非有限时间戳，此处再兜底防御直接调用。）
+    lower = Number.POSITIVE_INFINITY;
+    for (const record of records) {
+      const ts = record.timestampMs;
+      if (Number.isFinite(ts) && ts < lower) lower = ts;
     }
+    if (!Number.isFinite(lower)) return [];
   }
   const bucketMs = effectiveBucketMs(lower, upper, filters.bucketMs);
   const firstStart = Math.floor(lower / bucketMs) * bucketMs;
   const lastStart = Math.floor(upper / bucketMs) * bucketMs;
-  if (lastStart < firstStart) return [];
+  if (!Number.isFinite(firstStart) || !Number.isFinite(lastStart) || lastStart < firstStart) return [];
   const count = Math.floor((lastStart - firstStart) / bucketMs) + 1;
+  if (!Number.isFinite(count) || count <= 0) return [];
   const buckets = new Map<number, UsageRecord[]>();
   for (const record of records) {
     const start = Math.floor(record.timestampMs / bucketMs) * bucketMs;
