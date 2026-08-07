@@ -14,15 +14,14 @@ export function formatTokens(value: number): string {
 }
 
 /**
- * Cost follows the Web convention: fixed 4 decimals, `--` when unavailable,
- * `~…（估算）` for estimated, `…（混合）` for a recorded+estimated mix.
+ * Cost follows the Web convention: fixed 4 decimals, `--` when unavailable.
+ * Provenance suffixes (`（估算）` / `（混合）`) are intentionally omitted so
+ * the dashboard reads cleanly; estimation status is still visible via the
+ * tooltip/status line where available.
  */
 export function formatCost(cost: CostDisplay): string {
   if (cost.amount === null) return "--";
-  const base = `$${cost.amount.toFixed(4)}`;
-  if (cost.status === "estimated") return `~${base}（估算）`;
-  if (cost.status === "mixed") return `${base}（混合）`;
-  return base;
+  return `$${cost.amount.toFixed(4)}`;
 }
 
 /** Cache-hit rate; a null rate (zero denominator) renders as `--`. */

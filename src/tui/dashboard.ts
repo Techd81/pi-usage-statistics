@@ -18,9 +18,11 @@
  *   Cache read / Input / Output — no total).
  *
  * The component satisfies Pi's `Component` structural interface
- * (`render(width): string[]`, `handleInput?`, `invalidate()`) with zero
- * runtime dependency on `pi-tui`.
+ * (`render(width): string[]`, `handleInput?`, `invalidate()`); key matching
+ * uses `matchesKey()` from `@earendil-works/pi-tui` (aliased by Pi's
+ * extension loader), so it stays correct across terminal encodings.
  */
+import { matchesKey, Key } from "@earendil-works/pi-tui";
 import type { UsageFilters, UsageQueryResult } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
@@ -137,9 +139,6 @@ export function filtersFor(scope: Scope, timeRange: TimeRange, projectCwd: strin
   if (scope === "project" && projectCwd !== "") filters.projects = [projectCwd];
   return filters;
 }
-
-const KEY_ESC = "\u001b";
-const KEY_ESC_NAME = "escape";
 
 /** Wide layout uses a side-by-side hero/summary + five metric slots + emoji icons. */
 const WIDE_MIN_WIDTH = 60;
@@ -277,19 +276,20 @@ export class UsageDashboardComponent {
         this.refresh();
         this.requestRender();
         break;
-      case KEY_ESC:
-      case KEY_ESC_NAME:
-        if (this.viewMode === "models") {
-          this.viewMode = "main";
-          this.requestRender();
-          break;
-        }
-        if (!this.completed) {
-          this.completed = true;
-          this.dispose();
-          this.onDone();
-        }
-        break;
+    }
+    // Esc arrives as raw terminal bytes whose encoding depends on the
+    // terminal: legacy `\x1b`, Kitty-protocol CSI-u `\x1b[27u`, or xterm
+    // modifyOtherKeys `\x1b[27;1;27~`. matchesKey() covers all forms (and
+    // correctly rejects modified combos like shift/ctrl/alt+Esc).
+    if (matchesKey(data, Key.escape)) {
+      if (this.viewMode === "models") {
+        this.viewMode = "main";
+        this.requestRender();
+      } else if (!this.completed) {
+        this.completed = true;
+        this.dispose();
+        this.onDone();
+      }
     }
   }
 

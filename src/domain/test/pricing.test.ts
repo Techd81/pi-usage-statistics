@@ -212,6 +212,33 @@ describe("applyCostPolicy", () => {
     expect(result.estimatedCost).toBeUndefined();
   });
 
+  it("falls back to estimated for an all-zero recorded cost when the price is known (Pi writes zero placeholders for unpriced models)", () => {
+    const record = makeRecord({
+      inputTokens: 1000,
+      outputTokens: 1000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      recordedCost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+    expect(record.costKind).toBe("recorded");
+    const result = applyCostPolicy(record);
+    expect(result.costKind).toBe("estimated");
+    expect(result.estimatedCost!.total).toBe(0.018);
+  });
+
+  it("keeps an all-zero recorded cost when no price is known (no fabricated spend)", () => {
+    const record = makeRecord({
+      provider: "local",
+      model: "ollama-xyz",
+      inputTokens: 500,
+      outputTokens: 250,
+      recordedCost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+    const result = applyCostPolicy(record);
+    expect(result.costKind).toBe("recorded");
+    expect(result.estimatedCost).toBeUndefined();
+  });
+
   it("upgrades unavailable to estimated when a price is known", () => {
     const record = makeRecord({ inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(record.costKind).toBe("unavailable");

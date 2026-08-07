@@ -44,9 +44,9 @@ describe("formatCost", () => {
     expect(formatCost(cost(0.52205, "recorded"))).toBe("$0.5221");
   });
 
-  it("marks estimated and mixed costs", () => {
-    expect(formatCost(cost(0.018, "estimated"))).toBe("~$0.0180（估算）");
-    expect(formatCost(cost(0.3, "mixed"))).toBe("$0.3000（混合）");
+  it("renders estimated and mixed costs without provenance suffixes", () => {
+    expect(formatCost(cost(0.018, "estimated"))).toBe("$0.0180");
+    expect(formatCost(cost(0.3, "mixed"))).toBe("$0.3000");
   });
 
   it("renders unavailable cost as --", () => {

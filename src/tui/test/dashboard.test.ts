@@ -410,30 +410,38 @@ describe("UsageDashboardComponent.handleInput", () => {
     expect(after).toContain("Total tokens");
   });
 
-  it("AC7: Esc from models returns to main; Esc/q on main close once", async () => {
+  it("AC7: Esc returns to main from models; Esc on main closes once (legacy \\x1b and kitty CSI-u \\x1b[27u)", async () => {
     const deps = await makeDeps();
     const onDone = vi.fn();
     const component = new UsageDashboardComponent(deps, undefined, onDone);
 
+    // Esc as legacy byte from models → back to main, not closed
     component.handleInput("m");
     expect(component.currentViewMode).toBe("models");
     component.handleInput("\u001b");
     expect(component.currentViewMode).toBe("main");
     expect(onDone).not.toHaveBeenCalled();
 
+    // Esc as Kitty-protocol CSI-u sequence (the real terminal encoding that
+    // previously failed: \x1b[27u) from models → back to main, not closed
     component.handleInput("m");
-    component.handleInput("escape");
+    component.handleInput("\u001b[27u");
     expect(component.currentViewMode).toBe("main");
     expect(onDone).not.toHaveBeenCalled();
 
+    // Unrelated keys never close
     component.handleInput("x");
     component.handleInput("q");
     expect(onDone).not.toHaveBeenCalled();
-    component.handleInput("escape");
+
+    // Esc (kitty form) on main → close exactly once
+    component.handleInput("\u001b[27u");
     expect(onDone).toHaveBeenCalledTimes(1);
+
+    // Further Esc (legacy or kitty) after close are no-ops
     component.handleInput("q");
-    component.handleInput("escape");
     component.handleInput("\u001b");
+    component.handleInput("\u001b[27u");
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
