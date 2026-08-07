@@ -1,6 +1,6 @@
 /**
- * Overlay component tests: hero + metric slots + trend main view, models
- * view via `m`, Esc back from models, narrow stacking, and status-line keys.
+ * Overlay component tests: hero + metric slots + overlay trend main view,
+ * models view via `m`, Esc back from models, narrow stacking, and status-line keys.
  */
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,7 +62,7 @@ afterEach(() => {
 });
 
 describe("UsageDashboardComponent.render", () => {
-  it("AC1: wide main view shows hero, Requests/Cost, five metric slots, and Usage trend", async () => {
+  it("AC1: wide main view shows hero, Requests/Cost, five metric slots, and 使用趋势", async () => {
     const deps = await makeDeps();
     const component = new UsageDashboardComponent(deps);
     const lines = component.render(120);
@@ -76,10 +76,16 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("Cache write");
     expect(text).toContain("Cache read");
     expect(text).toContain("Cache hit");
-    expect(text).toContain("Usage trend");
-    // Trend series always present on main.
-    expect(text).toContain("cacheRead");
-    expect(text).toContain("cacheWrite");
+    expect(text).toContain("使用趋势");
+    expect(text).toMatch(/\d{2}-\d{2} \d{2}:\d{2}\s+—\s+\d{2}-\d{2} \d{2}:\d{2}/);
+    // Overlay legend (glyph forms) — not the old six independent trendBar rows.
+    expect(text).toContain("Cost(·$)");
+    expect(text).toContain("Cache write(+)");
+    expect(text).toContain("Cache read(*)");
+    expect(text).toContain("Input(o)");
+    expect(text).toContain("Output(x)");
+    expect(text).toContain("tokens ← | → cost($)");
+    expect(text).not.toMatch(/\btotal\(/i);
     // Compact hero subtitle.
     expect(text).toMatch(/~\s+\d/);
     // Non-null hit rate shows percent + block bar on the wide Cache hit slot.
@@ -113,7 +119,7 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toMatch(/\$\d+\.\d{4}/);
     // Models view does not render hero / five slots / trend title.
     expect(text).not.toContain("Total tokens");
-    expect(text).not.toContain("Usage trend");
+    expect(text).not.toContain("使用趋势");
 
     component.handleInput("m");
     expect(component.currentViewMode).toBe("main");
@@ -129,7 +135,7 @@ describe("UsageDashboardComponent.render", () => {
     const reqIdx = text.indexOf("Requests");
     const inputIdx = text.indexOf("Input");
     const hitIdx = text.indexOf("Cache hit");
-    const trendIdx = text.indexOf("Usage trend");
+    const trendIdx = text.indexOf("使用趋势");
     expect(totalIdx).toBeGreaterThanOrEqual(0);
     expect(reqIdx).toBeGreaterThan(totalIdx);
     expect(inputIdx).toBeGreaterThan(reqIdx);
@@ -224,13 +230,13 @@ describe("UsageDashboardComponent.handleInput", () => {
     const component = new UsageDashboardComponent(deps);
     expect(component.currentViewMode).toBe("main");
     const before = component.render(120).join("\n");
-    expect(before).toContain("Usage trend");
+    expect(before).toContain("使用趋势");
     expect(before).toContain("Total tokens");
 
     component.handleInput("s");
     expect(component.currentViewMode).toBe("main");
     const after = component.render(120).join("\n");
-    expect(after).toContain("Usage trend");
+    expect(after).toContain("使用趋势");
     expect(after).toContain("Total tokens");
   });
 
@@ -301,7 +307,7 @@ describe("makeOverlayFactory", () => {
       done,
     );
     const lines = component.render(80);
-    expect(lines.some((line) => line.includes("{muted:") || line.includes("{normal:"))).toBe(true);
+    expect(lines.some((line) => line.includes("{muted:") || line.includes("{normal:") || line.includes("{accent:"))).toBe(true);
   });
 
   it("falls back to the no-op theme when the Pi theme is unusable", async () => {

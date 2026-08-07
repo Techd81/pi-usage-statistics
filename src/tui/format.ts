@@ -172,6 +172,26 @@ export function trendBar(values: readonly number[], maxLen = 80): string {
     .join("");
 }
 
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/**
+ * Compact local date-time for trend axis ticks (e.g. `08-07 14:30`).
+ * Non-finite inputs collapse to `00-00 00:00`.
+ */
+export function formatDateTimeCompact(ms: number): string {
+  const t = Number.isFinite(ms) ? ms : 0;
+  const d = new Date(t);
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * Inclusive date-time range for the trend section title
+ * (e.g. `08-01 00:00 — 08-07 14:30`).
+ */
+export function formatDateRange(fromMs: number, toMs: number): string {
+  return `${formatDateTimeCompact(fromMs)} — ${formatDateTimeCompact(toMs)}`;
+}
+
 /** Display label for a time-range selector. */
 export function timeRangeLabel(range: "today" | "7d" | "30d" | "all"): string {
   switch (range) {

@@ -10,13 +10,14 @@
  *   then close).
  * - Dual views: the default main view shows a hero Total tokens + Requests/
  *   Cost summary, five metric slots (Input / Output / Cache write / Cache
- *   read / Cache hit with progress bar), and the Usage trend series below;
+ *   read / Cache hit with progress bar), and the Usage trend chart below;
  *   `[m]` switches to a full-width per-model table (models / requests /
  *   tokens / cost) and back. Narrow terminals stack the main blocks
  *   vertically.
- * - Trend curves: one bar row per series (total, input, output, cache read,
- *   cache write, cost) with a per-series legend value; series visibility and
- *   time range both recompute from the same `store.query` path (TC1).
+ * - Trend: overlaid five-series ASCII chart (Cost / Cache write / Cache
+ *   read / Input / Output — no total); token series share one scale, cost
+ *   is independently normalized. Time range recomputes via `store.query`
+ *   (TC1).
  * - Narrow widths truncate labels; render() never throws on overflow
  *   (TC2/TC3). Loading/error/empty/estimated/unavailable states render
  *   distinctly (TC3/TC4).
@@ -26,13 +27,14 @@
  * runtime dependency on `pi-tui` — the extension lazily imports this module
  * only inside the TUI-mode command path.
  */
-import type { UsageFilters, UsageQueryResult, TrendPoint } from "../domain";
+import type { UsageFilters, UsageQueryResult } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
 import {
   displayWidth,
   formatCompactTokens,
   formatCost,
+  formatDateRange,
   formatHitRate,
   formatTokens,
   hitRateBar,
@@ -40,9 +42,9 @@ import {
   padToWidth,
   scopeLabel,
   timeRangeLabel,
-  trendBar,
   truncateToWidth,
 } from "./format";
+import { renderTrendChart } from "./trend-chart";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
@@ -117,26 +119,6 @@ export function filtersFor(scope: Scope, timeRange: TimeRange, projectCwd: strin
   if (scope === "project" && projectCwd !== "") filters.projects = [projectCwd];
   return filters;
 }
-
-const SERIES_KEYS = ["total", "input", "output", "cacheRead", "cacheWrite", "cost"] as const;
-export type SeriesKey = (typeof SERIES_KEYS)[number];
-
-const seriesValues = (trend: readonly TrendPoint[], key: SeriesKey): number[] => {
-  switch (key) {
-    case "total":
-      return trend.map((point) => point.totalTokens);
-    case "input":
-      return trend.map((point) => point.inputTokens);
-    case "output":
-      return trend.map((point) => point.outputTokens);
-    case "cacheRead":
-      return trend.map((point) => point.cacheReadTokens);
-    case "cacheWrite":
-      return trend.map((point) => point.cacheWriteTokens);
-    case "cost":
-      return trend.map((point) => point.cost.amount ?? 0);
-  }
-};
 
 const KEY_ESC = "\u001b";
 const KEY_ESC_NAME = "escape";
@@ -269,8 +251,7 @@ export class UsageDashboardComponent {
     } else {
       this.renderMainWide(lines, result, width);
     }
-    lines.push(this.theme.selected(truncateToWidth("Usage trend", width)));
-    this.renderSeries(lines, result, width);
+    this.renderTrend(lines, result, width);
   }
 
   /** Wide: hero left, Requests/Cost right, five equal metric slots below. */
@@ -406,21 +387,27 @@ export class UsageDashboardComponent {
     return lines;
   }
 
-  private renderSeries(lines: string[], result: UsageQueryResult, width: number): void {
-    // All six series on every width; the bar span shrinks on narrow terminals
-    // and truncateToWidth keeps the row in bounds (no series filtering).
-    // Budget plain columns first (label + sum + 1-col gap + bars = width), then color.
-    const labelWidth = 11;
-    const sumWidth = 14;
-    const barWidth = Math.max(1, width - labelWidth - sumWidth - 1);
-    for (const key of SERIES_KEYS) {
-      const values = seriesValues(result.trend, key);
-      const sum = key === "cost" ? formatCost(result.totals.cost) : formatTokens(values.reduce((a, b) => a + b, 0));
-      const bars = trendBar(values, barWidth);
-      const label = padToWidth(truncateToWidth(key, labelWidth), labelWidth);
-      const sumCell = padStartToWidth(truncateToWidth(sum, sumWidth), sumWidth);
-      const plain = truncateToWidth(`${label}${sumCell} ${bars}`, width);
-      lines.push(this.theme.normal(plain));
+  /**
+   * 「使用趋势」 + date range, then the overlaid five-series chart.
+   * Chart colors use fixed ANSI (theme has no per-series palette); the
+   * outer `render` truncate pass keeps every row within `width`.
+   */
+  private renderTrend(lines: string[], result: UsageQueryResult, width: number): void {
+    const fromMs =
+      result.filters.fromMs > 0
+        ? result.filters.fromMs
+        : (result.trend[0]?.startMs ?? result.filters.fromMs);
+    const toMs =
+      result.filters.toMs < Number.MAX_SAFE_INTEGER
+        ? result.filters.toMs
+        : (result.trend[result.trend.length - 1]?.startMs ?? result.filters.toMs);
+    const range = formatDateRange(fromMs, toMs);
+    const title = truncateToWidth(`使用趋势  ${range}`, width);
+    lines.push(this.theme.selected(title));
+    // Noop theme in tests: skip ANSI so structural asserts stay stable.
+    const colorize = this.theme !== noopTheme;
+    for (const row of renderTrendChart(result.trend, { width, colorize })) {
+      lines.push(row);
     }
   }
 

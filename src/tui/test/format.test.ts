@@ -8,6 +8,8 @@ import {
   displayWidth,
   formatCompactTokens,
   formatCost,
+  formatDateRange,
+  formatDateTimeCompact,
   formatHitRate,
   formatTokens,
   hitRateBar,
@@ -139,6 +141,19 @@ describe("padToWidth / padStartToWidth", () => {
     expect(displayWidth(padStartToWidth(colored, 5))).toBe(5);
     expect(padToWidth("中", 4)).toBe("中  ");
     expect(padStartToWidth("中", 4)).toBe("  中");
+  });
+});
+
+describe("formatDateTimeCompact / formatDateRange", () => {
+  it("formats local compact date-time and ranges", () => {
+    const ms = new Date(2026, 7, 7, 14, 30, 0).getTime(); // Aug 7 local
+    expect(formatDateTimeCompact(ms)).toBe("08-07 14:30");
+    const from = new Date(2026, 7, 1, 0, 0, 0).getTime();
+    expect(formatDateRange(from, ms)).toBe("08-01 00:00 — 08-07 14:30");
+  });
+
+  it("collapses non-finite ms safely", () => {
+    expect(formatDateTimeCompact(Number.NaN)).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 });
 
