@@ -286,7 +286,7 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
       const y = rows[x]!;
       for (let r = y + 1; r < height; r++) {
         if (grid[r]![x]!.series === null) {
-          grid[r]![x] = { ch: "░", series: seriesIdx };
+          grid[r]![x] = { ch: ".", series: seriesIdx };
         }
       }
     }

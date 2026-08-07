@@ -27,16 +27,15 @@ import type { UsageStore } from "../storage";
 import {
   centerInWidth,
   displayWidth,
-  formatCompactTokens,
+  formatTokensZhCompact,
   formatCost,
   formatDateRange,
   formatHitRate,
   formatTokens,
   forceWidth,
+  FRAME_RIGHT_GUTTER,
   frameLines,
   hitRateBar,
-  padStartToWidth,
-  padToWidth,
   scopeLabel,
   timeRangeLabel,
   truncateToWidth,
@@ -235,7 +234,9 @@ export class UsageDashboardComponent {
   render(width: number): string[] {
     const w = Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
     const framed = w >= FRAME_MIN_WIDTH;
-    const inner = framed ? w - 2 : w;
+    // ││ = 2 cols; frameLines also keeps FRAME_RIGHT_GUTTER ASCII spaces
+    // before the right border to absorb ambiguous-width surprises.
+    const inner = framed ? w - 2 - FRAME_RIGHT_GUTTER : w;
     // Icon / layout density follows the outer terminal width so a 60-col
     // frame (inner 58) still uses the wide emoji layout.
     const wide = w >= WIDE_MIN_WIDTH;
@@ -258,14 +259,15 @@ export class UsageDashboardComponent {
       }
     }
 
-    lines.push(this.theme.muted(truncateToWidth(this.statusLine(), inner)));
+    lines.push(this.theme.muted(centerInWidth(truncateToWidth(this.statusLine(), inner), inner)));
     const capped = lines.map((line) => truncateToWidth(line, inner));
     return framed ? frameLines(capped, w) : capped;
   }
 
   /** Default main view: title banner + hero + metric slots + usage trend. */
   private renderMainView(lines: string[], result: UsageQueryResult, width: number, wide: boolean): void {
-    const banner = renderTitleBanner(width).map((line) => this.theme.selected(line));
+    const colorize = this.theme !== noopTheme;
+    const banner = renderTitleBanner(width, { colorize });
     lines.push(...banner);
     if (banner.length > 0) lines.push("");
     if (!wide) {
@@ -273,42 +275,52 @@ export class UsageDashboardComponent {
     } else {
       this.renderMainWide(lines, result, width);
     }
+    // One blank before the trend block — keeps metrics / title from stacking flush.
+    lines.push("");
     this.renderTrend(lines, result, width, wide);
   }
 
-  /** Wide: hero left, Requests/Cost right, five equal metric slots below. */
+  /** Wide: one summary row (Total tokens / Requests / Cost) + five metric slots. */
   private renderMainWide(lines: string[], result: UsageQueryResult, width: number): void {
     const totals = result.totals;
     const wide = true;
-    const heroLabel = withIcon(ICONS.totalTokens, "Total tokens", wide);
-    const heroValue = formatTokens(totals.totalTokens);
-    const heroSub = `~ ${formatCompactTokens(totals.totalTokens)}`;
-    const reqLabel = withIcon(ICONS.requests, "Requests", wide);
-    const reqValue = formatTokens(totals.requestCount);
-    const costLabel = withIcon(ICONS.cost, "Cost", wide);
-    const costValue = formatCost(totals.cost);
-
-    const rightReqPlain = `${reqLabel}  ${reqValue}`;
-    const rightCostPlain = `${costLabel}  ${costValue}`;
-    const rightW = Math.max(displayWidth(rightReqPlain), displayWidth(rightCostPlain), 12);
-    const leftW = Math.max(0, width - rightW - 1);
-
-    // Budget plain-text columns first; apply color only after truncation.
-    const leftLabel = padToWidth(truncateToWidth(heroLabel, leftW), leftW);
-    const rightReqCell = padStartToWidth(truncateToWidth(rightReqPlain, rightW), rightW);
-    lines.push(`${this.theme.muted(leftLabel)} ${this.theme.normal(rightReqCell)}`);
-
-    // Color only the numeric value (not the pad spaces) so theme wrappers /
-    // ANSI never inflate the plain-text column budget.
-    const heroTrunc = truncateToWidth(heroValue, leftW);
-    const leftValue = `${this.theme.selected(heroTrunc)}${" ".repeat(Math.max(0, leftW - displayWidth(heroTrunc)))}`;
-    lines.push(`${leftValue} ${this.colorCostCell(costLabel, costValue, rightW)}`);
-
-    const leftSub = padToWidth(truncateToWidth(heroSub, leftW), leftW);
-    const rightBlank = " ".repeat(rightW);
-    lines.push(`${this.theme.muted(leftSub)} ${rightBlank}`);
-
+    const cells = [
+      {
+        plain: `${withIcon(ICONS.totalTokens, "Total tokens", wide)}  ${formatTokens(totals.totalTokens)} （${formatTokensZhCompact(totals.totalTokens)}）`,
+        emphasize: true,
+      },
+      {
+        plain: `${withIcon(ICONS.requests, "Requests", wide)}  ${formatTokens(totals.requestCount)}`,
+        emphasize: false,
+      },
+      {
+        plain: `${withIcon(ICONS.cost, "Cost", wide)}  ${formatCost(totals.cost)}`,
+        emphasize: true,
+      },
+    ];
+    lines.push(this.equalSlotRow(cells, width));
+    lines.push("");
     lines.push(...this.metricSlotRows(result, width, wide));
+  }
+
+  /**
+   * Split `width` into N equal slots (diff ≤ 1) and render one cell per slot.
+   * Emphasized cells use `theme.selected` on the truncated plain text.
+   */
+  private equalSlotRow(
+    cells: readonly { plain: string; emphasize: boolean }[],
+    width: number,
+  ): string {
+    const n = cells.length;
+    if (n === 0) return forceWidth("", width);
+    const base = Math.floor(width / n);
+    const rem = width - base * n;
+    const parts = cells.map((cell, i) => {
+      const w = base + (i < rem ? 1 : 0);
+      const clipped = centerInWidth(truncateToWidth(cell.plain, w), w);
+      return cell.emphasize ? this.theme.selected(clipped) : this.theme.normal(clipped);
+    });
+    return forceWidth(parts.join(""), width);
   }
 
   /**
@@ -329,8 +341,14 @@ export class UsageDashboardComponent {
     const totals = result.totals;
     const wide = false;
     lines.push(this.theme.muted(truncateToWidth(withIcon(ICONS.totalTokens, "Total tokens", wide), width)));
-    lines.push(this.theme.selected(truncateToWidth(formatTokens(totals.totalTokens), width)));
-    lines.push(this.theme.muted(truncateToWidth(`~ ${formatCompactTokens(totals.totalTokens)}`, width)));
+    lines.push(
+      this.theme.selected(
+        truncateToWidth(
+          `${formatTokens(totals.totalTokens)} （${formatTokensZhCompact(totals.totalTokens)}）`,
+          width,
+        ),
+      ),
+    );
     lines.push(
       this.theme.normal(
         truncateToWidth(`${withIcon(ICONS.requests, "Requests", wide)}  ${formatTokens(totals.requestCount)}`, width),
@@ -359,8 +377,8 @@ export class UsageDashboardComponent {
   }
 
   /**
-   * Five equal-width metric slots on one or two rows. Cache hit includes a
-   * percent + block progress bar; column widths differ by at most 1.
+   * Five equal-width metric slots. Order keeps the Cache-hit progress bar off
+   * the rightmost column (Windows Terminal ambiguous-width / border punch).
    * Cache hit % uses `theme.selected` for emphasis.
    */
   private metricSlotRows(result: UsageQueryResult, width: number, wide: boolean): string[] {
@@ -370,44 +388,31 @@ export class UsageDashboardComponent {
     const widths = Array.from({ length: slots }, (_, i) => base + (i < rem ? 1 : 0));
 
     const totals = result.totals;
-    const labels = [
-      withIcon(ICONS.input, "Input", wide),
-      withIcon(ICONS.output, "Output", wide),
-      withIcon(ICONS.cacheWrite, "Cache write", wide),
-      withIcon(ICONS.cacheRead, "Cache read", wide),
-      withIcon(ICONS.cacheHit, "Cache hit", wide),
-    ];
-    const values = [
-      formatTokens(totals.inputTokens),
-      formatTokens(totals.outputTokens),
-      formatTokens(totals.cacheWriteTokens),
-      formatTokens(totals.cacheReadTokens),
-      formatHitRate(totals.cacheHitRate),
+    // Percent on the label row; value row is a full-slot Braille gauge.
+    const hitPct = formatHitRate(totals.cacheHitRate);
+    const specs: { label: string; kind: "plain" | "hit"; value: string }[] = [
+      { label: withIcon(ICONS.input, "Input", wide), kind: "plain", value: formatTokens(totals.inputTokens) },
+      { label: withIcon(ICONS.output, "Output", wide), kind: "plain", value: formatTokens(totals.outputTokens) },
+      {
+        label: `${withIcon(ICONS.cacheHit, "Cache hit", wide)} ${hitPct}`,
+        kind: "hit",
+        value: hitPct,
+      },
+      { label: withIcon(ICONS.cacheRead, "Cache read", wide), kind: "plain", value: formatTokens(totals.cacheReadTokens) },
+      { label: withIcon(ICONS.cacheWrite, "Cache write", wide), kind: "plain", value: formatTokens(totals.cacheWriteTokens) },
     ];
 
-    const labelRow = labels
-      .map((label, i) => padToWidth(truncateToWidth(label, widths[i]!), widths[i]!))
+    const labelRow = specs
+      .map((spec, i) => centerInWidth(truncateToWidth(spec.label, widths[i]!), widths[i]!))
       .join("");
 
-    const valueCells = values.map((value, i) => {
+    const valueCells = specs.map((spec, i) => {
       const w = widths[i]!;
-      if (i < 4) {
-        const cell = padToWidth(truncateToWidth(value, w), w);
-        return this.theme.normal(cell);
+      if (spec.kind === "plain") {
+        return this.theme.normal(centerInWidth(truncateToWidth(spec.value, w), w));
       }
-      // Cache hit: emphasized percent + muted bar in the remaining slot width.
-      const pct = value;
-      const gap = " ";
-      const prefixW = displayWidth(pct) + displayWidth(gap);
-      const barW = Math.max(0, w - prefixW);
-      const bar = hitRateBar(totals.cacheHitRate, barW);
-      const colored = `${this.theme.selected(truncateToWidth(pct, prefixW))}${gap}${this.theme.normal(bar)}`;
-      const plainBudget = padToWidth(truncateToWidth(`${pct}${gap}${bar}`, w), w);
-      // If colored display width drifts, fall back to truncated colored string.
-      if (displayWidth(colored) <= w) {
-        return colored + " ".repeat(Math.max(0, w - displayWidth(colored)));
-      }
-      return forceWidth(colored, w) || this.theme.normal(plainBudget);
+      const bar = hitRateBar(totals.cacheHitRate, w);
+      return this.theme.selected(centerInWidth(truncateToWidth(bar, w), w));
     });
     return [forceWidth(this.theme.muted(labelRow), width), forceWidth(valueCells.join(""), width)];
   }
@@ -426,7 +431,7 @@ export class UsageDashboardComponent {
 
   /**
    * Per-model table: Model / Requests / Tokens / Total cost / Avg cost.
-   * Columns separated by │; model left-aligned; numeric columns right-aligned.
+   * Columns separated by │; every cell centered in its column.
    */
   private modelLines(result: UsageQueryResult, width: number, withHeader: boolean, wide: boolean): string[] {
     const models = result.byModel;
@@ -458,8 +463,9 @@ export class UsageDashboardComponent {
       ...models.map((entry) => displayWidth(formatCost(entry.avgCost))),
     );
     const reserved = reqMax + tokMax + costMax + avgMax + displayWidth(colSep) * sepCount;
-    const longestName = Math.max(displayWidth(modelHeader), ...models.map((entry) => displayWidth(entry.model)));
-    const nameMax = Math.max(6, Math.min(longestName, Math.max(6, width - reserved)));
+    // Give every leftover column to the model name so the table spans full width
+    // instead of hugging content and leaving a blank right pane.
+    const nameMax = Math.max(6, width - reserved);
 
     const rule =
       "─".repeat(nameMax) +
@@ -471,19 +477,19 @@ export class UsageDashboardComponent {
       "─".repeat(costMax) +
       "┼" +
       "─".repeat(avgMax);
-    const separator = truncateToWidth(rule, width);
+    const separator = forceWidth(truncateToWidth(rule, width), width);
 
     const formatRow = (name: string, req: string, tok: string, total: string, avg: string): string =>
-      truncateToWidth(
-        padToWidth(name, nameMax) +
+      forceWidth(
+        centerInWidth(truncateToWidth(name, nameMax), nameMax) +
           colSep +
-          padStartToWidth(req, reqMax) +
+          centerInWidth(truncateToWidth(req, reqMax), reqMax) +
           colSep +
-          padStartToWidth(tok, tokMax) +
+          centerInWidth(truncateToWidth(tok, tokMax), tokMax) +
           colSep +
-          padStartToWidth(total, costMax) +
+          centerInWidth(truncateToWidth(total, costMax), costMax) +
           colSep +
-          padStartToWidth(avg, avgMax),
+          centerInWidth(truncateToWidth(avg, avgMax), avgMax),
         width,
       );
 

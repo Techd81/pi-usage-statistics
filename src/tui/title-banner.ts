@@ -1,41 +1,86 @@
 /**
- * Decorative title banner for the dashboard hero page.
- * Fullwidth / ornamental glyphs read as “art font” in the terminal
- * without needing an external figlet dependency.
+ * Terminal art title banner (FIGlet “ANSI Shadow” style), matching the
+ * cyan block-letter look used by tools like Trellis. Art is hardcoded so
+ * the package stays zero-dependency at runtime.
+ *
+ * Full title: **Pi Usage Statistics** (two ANSI Shadow rows).
  */
 import { centerInWidth, displayWidth } from "./format";
 
-/** Fullwidth Latin title: roughly 2 columns per letter. */
-const FULLWIDTH_TITLE = "Ｐｉ Ｕｓａｇｅ Ｓｔａｔｉｓｔｉｃｓ";
+/** Bright cyan face (Trellis-like terminal art). */
+const CYAN = "\u001b[96m";
+const RESET = "\u001b[0m";
 
 /**
- * Compact 4-line ASCII wordmark (fits ~48+ columns when centered).
- * Source: hand-tuned small banner for "Pi Usage".
+ * FIGlet font "ANSI Shadow" for "Pi Usage" (57 columns).
+ * Generated once; do not regenerate at runtime.
  */
-const ASCII_WORDMARK = [
-  " ____  _   _   _                  ",
-  "|  _ \\(_) | | | |___  __ _  __ _  ___",
-  "| |_) | | | | | / __|/ _` |/ _` |/ _ \\",
-  "|  __/| | | |_| \\__ \\ (_| | (_| |  __/",
-  "|_|   |_|  \\___/|___/\\__,_|\\__, |\\___|",
-  "                           |___/     ",
+const ANSI_SHADOW_PI_USAGE = [
+  "██████╗ ██╗    ██╗   ██╗███████╗ █████╗  ██████╗ ███████╗",
+  "██╔══██╗██║    ██║   ██║██╔════╝██╔══██╗██╔════╝ ██╔════╝",
+  "██████╔╝██║    ██║   ██║███████╗███████║██║  ███╗█████╗  ",
+  "██╔═══╝ ██║    ██║   ██║╚════██║██╔══██║██║   ██║██╔══╝  ",
+  "██║     ██║    ╚██████╔╝███████║██║  ██║╚██████╔╝███████╗",
+  "╚═╝     ╚═╝     ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
 ] as const;
 
 /**
- * Render a centered artistic title. Wide terminals get the ASCII wordmark;
- * narrower ones get a single fullwidth ornamental line + underline.
+ * FIGlet font "ANSI Shadow" for "Statistics" (73 columns).
+ * Same face/shadow style as the Pi Usage row above.
  */
-export function renderTitleBanner(width: number): string[] {
+const ANSI_SHADOW_STATISTICS = [
+  "███████╗████████╗ █████╗ ████████╗██╗███████╗████████╗██╗ ██████╗███████╗",
+  "██╔════╝╚══██╔══╝██╔══██╗╚══██╔══╝██║██╔════╝╚══██╔══╝██║██╔════╝██╔════╝",
+  "███████╗   ██║   ███████║   ██║   ██║███████╗   ██║   ██║██║     ███████╗",
+  "╚════██║   ██║   ██╔══██║   ██║   ██║╚════██║   ██║   ██║██║     ╚════██║",
+  "███████║   ██║   ██║  ██║   ██║   ██║███████║   ██║   ██║╚██████╗███████║",
+  "╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝╚══════╝   ╚═╝   ╚═╝ ╚═════╝╚══════╝",
+] as const;
+
+/** Narrow fallback: fullwidth ornamental one-liner. */
+const FULLWIDTH_TITLE = "Ｐｉ Ｕｓａｇｅ Ｓｔａｔｉｓｔｉｃｓ";
+
+export type TitleBannerOptions = {
+  /** Apply bright-cyan ANSI (default true). Tests may pass false. */
+  colorize?: boolean;
+};
+
+const paint = (line: string, colorize: boolean): string =>
+  colorize ? `${CYAN}${line}${RESET}` : line;
+
+const maxArtWidth = (rows: readonly string[]): number =>
+  Math.max(...rows.map((line) => displayWidth(line)));
+
+/**
+ * Centered ANSI-Shadow banner for the full title **Pi Usage Statistics**
+ * (two stacked wordmarks). Falls back to a fullwidth one-liner when narrow.
+ */
+export function renderTitleBanner(width: number, options: TitleBannerOptions = {}): string[] {
   const w = Number.isFinite(width) && width > 0 ? Math.floor(width) : 0;
   if (w <= 0) return [];
+  const colorize = options.colorize !== false;
 
-  const wordmarkWidth = Math.max(...ASCII_WORDMARK.map((line) => displayWidth(line)));
-  if (w >= wordmarkWidth + 2) {
-    return ASCII_WORDMARK.map((line) => centerInWidth(line, w));
+  const statsWidth = maxArtWidth(ANSI_SHADOW_STATISTICS);
+  const piWidth = maxArtWidth(ANSI_SHADOW_PI_USAGE);
+
+  // Full two-line ANSI Shadow title when both wordmarks fit.
+  if (w >= statsWidth + 2) {
+    return [
+      ...ANSI_SHADOW_PI_USAGE.map((line) => paint(centerInWidth(line, w), colorize)),
+      centerInWidth("", w),
+      ...ANSI_SHADOW_STATISTICS.map((line) => paint(centerInWidth(line, w), colorize)),
+    ];
+  }
+
+  // Mid width: keep "Pi Usage" art only + a plain Statistics label.
+  if (w >= piWidth + 2) {
+    return [
+      ...ANSI_SHADOW_PI_USAGE.map((line) => paint(centerInWidth(line, w), colorize)),
+      centerInWidth("", w),
+      paint(centerInWidth("Statistics", w), colorize),
+    ];
   }
 
   const orn = w >= displayWidth(`✦ ${FULLWIDTH_TITLE} ✦`) ? `✦ ${FULLWIDTH_TITLE} ✦` : FULLWIDTH_TITLE;
-  const title = centerInWidth(orn, w);
-  const rule = centerInWidth("━".repeat(Math.min(w, Math.max(8, displayWidth(orn) - 2))), w);
-  return [title, rule];
+  return [paint(centerInWidth(orn, w), colorize)];
 }

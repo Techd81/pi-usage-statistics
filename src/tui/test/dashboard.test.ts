@@ -74,6 +74,7 @@ describe("UsageDashboardComponent.render", () => {
     expect(lines.some((line) => line.startsWith("│") && line.endsWith("│"))).toBe(true);
 
     expect(text).toContain("Total tokens");
+    expect(text).toMatch(/Total tokens\s+[\d,]+\s+（[\d.]+万）/);
     expect(text).toContain("📚");
     expect(text).toContain("📨");
     expect(text).toContain("💰");
@@ -91,7 +92,7 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("Cache read");
     expect(text).toContain("Cache hit");
     expect(text).toContain("使用趋势");
-    expect(text).toMatch(/\d{2}-\d{2} \d{2}:\d{2}\s+—\s+\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(text).toMatch(/\d{2}-\d{2} \d{2}:\d{2}\s+-\s+\d{2}-\d{2} \d{2}:\d{2}/);
     // Overlay legend (glyph forms) — not the old six independent trendBar rows.
     expect(text).toContain("Cost(·$)");
     expect(text).toContain("Cache write(+)");
@@ -100,8 +101,9 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("Output(x)");
     expect(text).toContain("tokens <- | -> cost($)");
     expect(text).not.toMatch(/\btotal\(/i);
-    // Artistic title on hero page.
-    expect(text).toMatch(/Pi Usage|Ｐｉ|___/);
+    // ANSI Shadow terminal art: Pi Usage + Statistics (same font).
+    expect(text).toContain("██████");
+    expect(text).toContain("███████╗████████╗");
     // Trend title + legend are centered (leading spaces before 使用趋势 / Cost).
     const trendLine = lines.find((line) => line.includes("使用趋势"));
     expect(trendLine).toBeDefined();
@@ -113,10 +115,14 @@ describe("UsageDashboardComponent.render", () => {
     for (const line of lines) {
       expect(displayWidth(line)).toBe(120);
     }
-    // Compact hero subtitle.
-    expect(text).toMatch(/~\s+\d/);
-    // Non-null hit rate shows percent + block bar on the wide Cache hit slot.
-    expect(text).toMatch(/[\d.]+%\s*[█░]/);
+    // Summary row: Total tokens / Requests / Cost on one evenly spaced line.
+    const summaryLine = lines.find(
+      (line) => line.includes("Total tokens") && line.includes("Requests") && line.includes("Cost"),
+    );
+    expect(summaryLine).toBeDefined();
+    // Non-null hit rate: percent on the label row + full-slot ASCII [#-] bar.
+    expect(text).toMatch(/Cache hit\s+[\d.]+%/);
+    expect(text).toMatch(/[⣿⣷⣧⣇⡇⣶⣦⣤⣄⣀⡀⠀⠉⠁]/);
     // Status line keys match real bindings (no [s], has [m]).
     expect(text).toContain("范围: 全局");
     expect(text).toContain("时间: 今天");
@@ -149,12 +155,24 @@ describe("UsageDashboardComponent.render", () => {
     );
     expect(headerLine).toBeDefined();
     expect(headerLine!).toMatch(/Model.*│.*Requests.*│.*Tokens.*│.*Total cost.*│.*Avg cost/);
+    // Cells are centered in each column (model name is not left-flush in a wide Model col).
+    const dataLine = models.find((line) => line.includes("model-01"));
+    expect(dataLine).toBeDefined();
+    const modelCell = dataLine!.split("│")[1] ?? "";
+    expect(modelCell.search(/model-01/)).toBeGreaterThan(0);
     expect(text).toContain("┼");
     expect(text).toContain("🤖");
     expect(text).toContain("model-01");
     expect(text).toContain("model-03");
     expect(text).toMatch(/\$\d+\.\d{4}/);
     expect(models.some((line) => /─{3,}┼─{3,}/.test(line))).toBe(true);
+    // Table rows span the full framed width (no dead right gutter).
+    for (const line of models) {
+      expect(displayWidth(line)).toBe(120);
+    }
+    const sepLine = models.find((line) => line.includes("┼"));
+    expect(sepLine).toBeDefined();
+    expect(displayWidth(sepLine!)).toBe(120);
     // Models view does not render hero / five slots / trend title.
     expect(text).not.toContain("Total tokens");
     expect(text).not.toContain("使用趋势");
@@ -247,9 +265,9 @@ describe("UsageDashboardComponent.render", () => {
     };
     const text = new UsageDashboardComponent(deps, theme).render(120).join("\n");
     // Cost may be `$…` or `--` depending on provenance mix; either is emphasized.
-    expect(text).toMatch(/\u001b\[1m(\$|--)/);
-    expect(text).toMatch(/\u001b\[1m[\d,]+\u001b\[0m/); // hero token count
-    expect(text).toMatch(/\u001b\[1m[\d.]+%\u001b\[0m/); // cache hit %
+    expect(text).toMatch(/\u001b\[1m(\$|--|.*Cost)/);
+    expect(text).toMatch(/\u001b\[1m.*[\d,]/); // summary Total tokens cell
+    expect(text).toMatch(/\u001b\[1m[⠀⠁⠂⠄⠈⠉⠊⠋⠛⠿⠶⠷⠴⠤⡇⣇⣧⣷⣿ ]+\u001b\[0m/); // Braille cache-hit bar
   });
 
   it("AC4/AC5: narrow stacks vertically, keeps row widths, and shows hit bar or --", async () => {
@@ -318,11 +336,12 @@ describe("UsageDashboardComponent.render", () => {
       }),
     );
     const lines = new UsageDashboardComponent({ store, projectCwd: "/projects/p1" }).render(120);
+    const labelLine = lines.find((line) => line.includes("Cache hit"));
+    expect(labelLine).toBeDefined();
+    expect(labelLine!).toMatch(/Cache hit\s+--/);
     const labelIdx = lines.findIndex((line) => line.includes("Cache hit"));
-    expect(labelIdx).toBeGreaterThanOrEqual(0);
     const valueLine = lines[labelIdx + 1]!;
-    expect(valueLine).toContain("--");
-    expect(valueLine).not.toMatch(/[█░]/);
+    expect(valueLine).not.toMatch(/[⣿⣷⣧⣇⡇⣶⣦⣤⣄]/);
   });
 
   it("TC3: zero-data state renders a meaningful message", async () => {

@@ -9,6 +9,7 @@ import {
   displayWidth,
   forceWidth,
   formatCompactTokens,
+  formatTokensZhCompact,
   formatCost,
   formatDateRange,
   formatDateTimeCompact,
@@ -76,14 +77,43 @@ describe("formatCompactTokens", () => {
   });
 });
 
+describe("formatTokensZhCompact", () => {
+  it("uses 亿 at ≥1e8 and 万 below", () => {
+    expect(formatTokensZhCompact(85_003_298)).toBe("8500.33万");
+    expect(formatTokensZhCompact(100_000_000)).toBe("1亿");
+    expect(formatTokensZhCompact(250_000_000)).toBe("2.5亿");
+    expect(formatTokensZhCompact(12_500)).toBe("1.25万");
+    expect(formatTokensZhCompact(0)).toBe("0万");
+  });
+
+  it("collapses non-finite and negative inputs to 0万", () => {
+    expect(formatTokensZhCompact(Number.NaN)).toBe("0万");
+    expect(formatTokensZhCompact(-5)).toBe("0万");
+  });
+});
+
 describe("hitRateBar", () => {
-  it("fills a block bar for 0–100 and returns empty for null/zero width", () => {
+  it("renders a Braille gauge with exact width; empty for null/zero width", () => {
     expect(hitRateBar(null, 10)).toBe("");
     expect(hitRateBar(50, 0)).toBe("");
-    expect(hitRateBar(0, 4)).toBe("░░░░");
-    expect(hitRateBar(100, 4)).toBe("████");
-    expect(hitRateBar(50, 4)).toBe("██░░");
-    expect(displayWidth(hitRateBar(75, 8))).toBe(8);
+    expect(hitRateBar(0, 4)).toBe("⠀⠀⠀⠀");
+    expect(hitRateBar(100, 4)).toBe("⣿⣿⣿⣿");
+    expect(displayWidth(hitRateBar(75, 10))).toBe(10);
+    expect(displayWidth(hitRateBar(10, 8))).toBe(8);
+  });
+
+  it("changes glyph density across rate stages (spark → fire)", () => {
+    const spark = hitRateBar(10, 10);
+    const fire = hitRateBar(90, 10);
+    expect(spark).not.toBe(fire);
+    expect(spark).toMatch(/^[⠀⠁⠂⠄⠈⠉⠊⠋⠛⠿⠶⠷⠴⠤⡇⣷⣿]+$/u);
+    expect(fire).toContain("⣿");
+    expect(fire).toContain("⣀"); // ember track in the 75–99 band
+  });
+
+  it("counts Braille cells as 1 column", () => {
+    expect(displayWidth("⣿⣷⣧")).toBe(3);
+    expect(displayWidth("⠀")).toBe(1);
   });
 });
 
@@ -168,7 +198,17 @@ describe("formatDateTimeCompact / formatDateRange", () => {
     const ms = new Date(2026, 7, 7, 14, 30, 0).getTime(); // Aug 7 local
     expect(formatDateTimeCompact(ms)).toBe("08-07 14:30");
     const from = new Date(2026, 7, 1, 0, 0, 0).getTime();
-    expect(formatDateRange(from, ms)).toBe("08-01 00:00 — 08-07 14:30");
+    expect(formatDateRange(from, ms)).toBe("08-01 00:00 - 08-07 14:30");
+  });
+
+  it("counts en/em dashes as 1 column (Windows Terminal)", () => {
+    expect(displayWidth("—")).toBe(1);
+    expect(displayWidth("–")).toBe(1);
+    expect(displayWidth("08-07 00:00 - 08-07 16:15")).toBe(25);
+  });
+
+  it("ignores emoji variation selectors when measuring width", () => {
+    expect(displayWidth("⚡\uFE0F")).toBe(displayWidth("⚡"));
   });
 
   it("collapses non-finite ms safely", () => {
@@ -180,9 +220,9 @@ describe("trendBar", () => {
   it("maps a series to 8-level bars, bounded to 80 cells", () => {
     const bar = trendBar([0, 1, 5, 9]);
     expect(bar.length).toBe(4);
-    expect(bar).toMatch(/^[▁-█]+$/);
-    expect(trendBar([5, 5])).toBe("██"); // max maps to the top level
-    expect(trendBar([0, 0])).toBe("▁▁");
+    expect(bar).toMatch(/^[_.:\-=+*#]+$/);
+    expect(trendBar([5, 5])).toBe("##"); // max maps to the top level
+    expect(trendBar([0, 0])).toBe("__");
   });
 
   it("returns empty for an empty series and caps long series", () => {
@@ -193,9 +233,9 @@ describe("trendBar", () => {
   it("clamps negative values to the lowest bar instead of dropping bars", () => {
     const bar = trendBar([-5, 10, 0]);
     expect(bar.length).toBe(3); // never shorter than the input
-    expect(bar[1]).toBe("█");
-    expect(bar[0]).toBe("▁");
-    expect(bar[2]).toBe("▁");
+    expect(bar[1]).toBe("#");
+    expect(bar[0]).toBe("_");
+    expect(bar[2]).toBe("_");
   });
 });
 
@@ -215,6 +255,15 @@ describe("frameLines", () => {
     const lines = frameLines(["abcdefghij"], 5);
     expect(lines).toEqual(["abcde"]);
     expect(lines[0]).not.toMatch(/[┌│└]/);
+  });
+
+  it("keeps a multi-column ASCII gutter before the right border", () => {
+    const framed = frameLines(["hello", "world"], 12);
+    expect(framed[1]!.endsWith(`${" ".repeat(4)}│`)).toBe(true);
+    for (const line of framed) {
+      expect(displayWidth(line)).toBe(12);
+      expect(line.endsWith("┐") || line.endsWith("┘") || line.endsWith("│")).toBe(true);
+    }
   });
 
   it("keeps right border attached when content would otherwise overflow", () => {
