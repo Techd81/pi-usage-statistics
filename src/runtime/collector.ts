@@ -20,14 +20,11 @@
  * Reconciliation rule (documented): live records and scanned records share
  * the domain identity rule (responseId / timestamp+content fingerprint) and
  * the store upserts by recordId, so re-delivery and re-scanning never change
- * totals for the same message. Legacy session entries without a responseId
- * fall back to the session entry id on the scan side only — the documented
- * corner case where a live fingerprint record and a scanned entry-id record
- * could coexist is limited to messages missing BOTH responseId and timestamp.
+ * totals for the same message. Cost policy is applied inside `UsageStore.upsertRecord`.
  */
 import type { ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 import type { UsageRecord } from "../domain";
-import { applyCostPolicy, assistantMessageEntryId, normalizeAssistantMessage, normalizeSummaryUsage } from "../domain";
+import { assistantMessageEntryId, normalizeAssistantMessage, normalizeSummaryUsage } from "../domain";
 import type { UsageStore } from "../storage";
 
 export type SessionIdentity = {
@@ -55,13 +52,6 @@ const readString = (value: unknown): string => (typeof value === "string" ? valu
 const readTimestampMs = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) ? value : Date.now();
 
-/** Apply the cost policy (recorded -> estimated -> unavailable) and upsert. */
-function upsertPriced(store: UsageStore, record: UsageRecord): UsageRecord {
-  const priced = applyCostPolicy(record);
-  store.upsertRecord(priced);
-  return priced;
-}
-
 /**
  * Collect usage from a finalized message. Returns the stored record, or null
  * when the message carries nothing countable. Never throws.
@@ -77,7 +67,7 @@ export function collectMessageEnd(
 
   if (role === "assistant") {
     const record = normalizeAssistantMessage(message, { ...identity, entryId: assistantMessageEntryId(message, "") });
-    return record ? upsertPriced(store, record) : null;
+    return record ? store.upsertRecord(record) : null;
   }
 
   if (role === "toolResult") {
@@ -89,7 +79,7 @@ export function collectMessageEnd(
       entryId: toolCallId !== "" ? `summary:${toolCallId}` : assistantMessageEntryId(message, ""),
       timestampMs: isObject(message) ? readTimestampMs(message.timestamp) : Date.now(),
     });
-    return record ? upsertPriced(store, record) : null;
+    return record ? store.upsertRecord(record) : null;
   }
 
   return null;

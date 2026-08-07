@@ -154,7 +154,7 @@ const toolResultMessageEndEvent = (toolCallId: string, input: number, output: nu
 
 
 class ThrowingStore extends UsageStore {
-  override upsertRecord(): void {
+  override upsertRecord(): never {
     throw new Error("store boom");
   }
 }

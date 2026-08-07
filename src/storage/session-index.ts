@@ -17,11 +17,23 @@
  * Pi session files are the authoritative source; the local index is a
  * rebuildable cache (SC3/SC4).
  */
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SessionManager, getAgentDir, type SessionEntry, type SessionInfo } from "@earendil-works/pi-coding-agent";
-import type { UsageFilters, UsageQueryResult, UsageRecord, SessionContext } from "../domain";
-import { assistantMessageEntryId, normalizeAssistantMessage, normalizeSummaryUsage } from "../domain";
+import type { PricingTable, UsageFilters, UsageQueryResult, UsageRecord, SessionContext } from "../domain";
+import {
+  BUILTIN_PRICE_TABLE,
+  applyCostPolicy,
+  assistantMessageEntryId,
+  mergePricingTables,
+  normalizeAssistantMessage,
+  normalizeSummaryUsage,
+  parsePricingTableJson,
+} from "../domain";
 import { RecordStore, STORE_SCHEMA_VERSION } from "./record-store";
+
+/** Optional local price override filename under the store directory. */
+export const PRICING_FILE = "pricing.json";
 
 /** Directory name for the plugin's durable state under the agent dir. */
 export const STORE_DIR_NAME = "token-usage-statistics";
@@ -57,27 +69,36 @@ export type StoreDependencies = {
  * normalize via the domain `normalizeAssistantMessage`; compaction and
  * branch-summary entries carry optional summary usage. Returns an empty array
  * for entries that carry no countable usage; never throws.
+ *
+ * Cost policy (recorded → estimated → unavailable) is applied here so scanned
+ * history matches the live collector path.
  */
-export function decodeSessionEntry(entry: SessionEntry, ctx: Omit<SessionContext, "entryId">): UsageRecord[] {
+export function decodeSessionEntry(
+  entry: SessionEntry,
+  ctx: Omit<SessionContext, "entryId">,
+  priceTable: PricingTable = BUILTIN_PRICE_TABLE,
+): UsageRecord[] {
   if (!entry || typeof entry !== "object") return [];
-  const timestampMs = readTimestampMs(entry.timestamp);
+  const entryTs = parseStrictTimestampMs(entry.timestamp);
+  const timestampMs = entryTs ?? Date.now();
   switch (entry.type) {
     case "message": {
       // Prefer the message's own epoch-ms timestamp; fall back to the entry
-      // timestamp (ISO, parsed above) so old entries keep their true time
-      // instead of drifting to "now" on every rescan (SC2).
+      // timestamp (ISO) so old entries keep their true time instead of
+      // drifting to "now" on every rescan (SC2).
       const message = withEntryTimestampFallback(entry.message, timestampMs);
       // Same identity rule as the live message_end collector (responseId,
-      // else timestamp+content fingerprint) so a message recorded live and
-      // the same message read from a session file share one recordId (SC2,
-      // RC1). Identity is computed on the RAW message (before the timestamp
-      // backfill) and falls back to the entry id for legacy messages lacking
-      // both responseId and a real timestamp, keeping scans deterministic.
+      // else timestamp+content fingerprint). When the persisted message lacks
+      // a timestamp but the entry has a real one, identity uses the backfilled
+      // message so live+scan share one recordId (SC2). Only when the entry
+      // timestamp itself is unparseable do we fall back to entry.id.
+      const messageForId =
+        entryTs !== null ? withEntryTimestampFallback(entry.message, entryTs) : entry.message;
       const record = normalizeAssistantMessage(message, {
         ...ctx,
-        entryId: assistantMessageEntryId(entry.message, entry.id ?? ""),
+        entryId: assistantMessageEntryId(messageForId, entry.id ?? ""),
       });
-      return record ? [record] : [];
+      return record ? [applyCostPolicy(record, priceTable)] : [];
     }
     case "compaction":
     case "branch_summary": {
@@ -86,7 +107,7 @@ export function decodeSessionEntry(entry: SessionEntry, ctx: Omit<SessionContext
       const usage = (entry as { usage?: unknown }).usage;
       if (usage === undefined || usage === null) return [];
       const record = normalizeSummaryUsage(usage, { ...ctx, entryId, timestampMs });
-      return record ? [record] : [];
+      return record ? [applyCostPolicy(record, priceTable)] : [];
     }
     default:
       return [];
@@ -94,17 +115,17 @@ export function decodeSessionEntry(entry: SessionEntry, ctx: Omit<SessionContext
 }
 
 /**
- * Parse a session-entry timestamp. Entries store ISO strings; assistant
- * messages embed epoch-ms numbers. Anything unparseable falls back to "now"
- * so a record is never dropped for a missing clock value.
+ * Parse a session-entry timestamp strictly. Returns null when unparseable so
+ * identity logic never invents a Date.now() fingerprint that would change
+ * across rescans.
  */
-const readTimestampMs = (value: unknown): number => {
+const parseStrictTimestampMs = (value: unknown): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
     const parsed = Date.parse(value);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return Date.now();
+  return null;
 };
 
 /**
@@ -134,6 +155,8 @@ export class UsageStore {
   private liveRecords = new Map<string, UsageRecord>();
   /** True after a scan completed at least once; queries may serve cached state. */
   private scannedOnce = false;
+  /** Active price table (builtin merged with optional local override). */
+  private priceTable: PricingTable = BUILTIN_PRICE_TABLE;
 
   constructor(deps: StoreDependencies = {}) {
     const agentDir = getAgentDir();
@@ -144,9 +167,31 @@ export class UsageStore {
     this.progress = deps.progress;
   }
 
-  /** Initialize: load the durable index from disk (non-fatal on corruption). */
+  /** Initialize: load the durable index + optional pricing.json (non-fatal). */
   async init(): Promise<void> {
     await this.store.load();
+    await this.loadPricingOverride();
+  }
+
+  /**
+   * Load `<storeDir>/pricing.json` when present. Invalid/missing files leave
+   * the built-in table unchanged (DC4: overrides are all-or-nothing).
+   */
+  private async loadPricingOverride(): Promise<void> {
+    try {
+      const text = await readFile(join(this.store.directory, PRICING_FILE), "utf8");
+      const override = parsePricingTableJson(text);
+      if (override) {
+        this.priceTable = mergePricingTables(override, BUILTIN_PRICE_TABLE);
+      }
+    } catch {
+      // Absent or unreadable override is fine — keep builtin.
+    }
+  }
+
+  /** Current price table (tests / live collector). */
+  getPricingTable(): PricingTable {
+    return this.priceTable;
   }
 
   query(filters: UsageFilters, refreshedAtMs?: number): UsageQueryResult {
@@ -154,14 +199,16 @@ export class UsageStore {
   }
 
   /**
-   * Live event path (message_end): upsert immediately so the current session
-   * reflects the record, then mark the store dirty so the next scan
-   * reconciles rather than double-counting (SC2).
+   * Live event path (message_end): apply cost policy, upsert immediately so
+   * the current session reflects the record, then mark dirty so the next
+   * scan reconciles rather than double-counting (SC2).
    */
-  upsertRecord(record: UsageRecord): void {
-    this.store.upsertRecord(record);
-    this.liveRecords.set(record.recordId, record);
+  upsertRecord(record: UsageRecord): UsageRecord {
+    const priced = applyCostPolicy(record, this.priceTable);
+    this.store.upsertRecord(priced);
+    this.liveRecords.set(priced.recordId, priced);
     if (this.inflight) this.dirtyDuringScan = true;
+    return priced;
   }
 
   /** One coalesced scan pass with optional per-call progress (design contract). */
@@ -265,7 +312,7 @@ export class UsageStore {
         };
         for (const entry of entries) {
           try {
-            const records = decodeSessionEntry(entry, ctx);
+            const records = decodeSessionEntry(entry, ctx, this.priceTable);
             scanned.push(...records);
           } catch {
             summary.entryErrors += 1; // one bad entry never stops the session
@@ -290,6 +337,12 @@ export class UsageStore {
         this.store.merge(scanned);
         this.store.merge([...this.liveRecords.values()]);
         summary.recordsMerged = scanned.length + this.liveRecords.size;
+      }
+      // Drop live overlays that the scan already reconciled — keeps long
+      // sessions from re-merging an ever-growing live set on every refresh.
+      const scannedIds = new Set(scanned.map((r) => r.recordId));
+      for (const id of this.liveRecords.keys()) {
+        if (scannedIds.has(id)) this.liveRecords.delete(id);
       }
       this.scannedOnce = true;
       await this.store.flush();

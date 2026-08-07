@@ -124,6 +124,10 @@ export class RecordStore {
     this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
   }
 
+  get directory(): string {
+    return this.storeDir;
+  }
+
   get recordsFilePath(): string {
     return join(this.storeDir, RECORDS_FILE);
   }
