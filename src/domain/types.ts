@@ -100,6 +100,14 @@ export type TrendPoint = {
   cost: CostDisplay;
 };
 
+/** Per-model usage aggregate for the dashboard model table. */
+export type ModelUsage = {
+  model: string;
+  /** Finalized assistant responses only; summary usage is excluded (mirrors `totals.requestCount`). */
+  requestCount: number;
+  totalTokens: number;
+};
+
 /** Shared query contract consumed by both the web API and the TUI. */
 export type UsageQueryResult = {
   filters: UsageFilters;
@@ -114,6 +122,8 @@ export type UsageQueryResult = {
     cost: CostDisplay;
   };
   trend: TrendPoint[];
+  /** Per-model aggregates, sorted by requestCount desc then model name asc (deterministic). */
+  byModel: ModelUsage[];
   dimensions: {
     providers: string[];
     models: string[];

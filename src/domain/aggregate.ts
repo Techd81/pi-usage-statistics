@@ -8,7 +8,7 @@
  * unavailable counts feed a `CostDisplay` where any unavailable record makes
  * the aggregate amount null ("--") while token series stay intact (DC3).
  */
-import type { CostDisplay, UsageFilters, UsageQueryResult, UsageRecord, TrendPoint } from "./types";
+import type { CostDisplay, ModelUsage, UsageFilters, UsageQueryResult, UsageRecord, TrendPoint } from "./types";
 import { COST_CURRENCY } from "./types";
 
 /** Default trend bucket width (ms); 30_000 is a supported value per the parent design. */
@@ -113,6 +113,27 @@ export function costDisplay(records: readonly UsageRecord[]): CostDisplay {
 
 const distinctSorted = (values: string[]): string[] =>
   [...new Set(values.filter((value) => value !== ""))].sort();
+
+/**
+ * Per-model aggregates over the filtered set. `requestCount` counts finalized
+ * assistant responses only (same semantics as `totals.requestCount`); summary
+ * usage contributes tokens but never requests. Empty model names are skipped
+ * (mirrors the `dimensions` filter). Sorted by requestCount desc, then model
+ * name asc — deterministic for tests and stable UI ordering.
+ */
+function buildByModel(records: readonly UsageRecord[]): ModelUsage[] {
+  const byModel = new Map<string, { requestCount: number; totalTokens: number }>();
+  for (const record of records) {
+    if (record.model === "") continue;
+    const entry = byModel.get(record.model) ?? { requestCount: 0, totalTokens: 0 };
+    if (record.sourceKind === "assistant") entry.requestCount += record.requestCount;
+    entry.totalTokens += record.totalTokens;
+    byModel.set(record.model, entry);
+  }
+  return [...byModel.entries()]
+    .map(([model, { requestCount, totalTokens }]) => ({ model, requestCount, totalTokens }))
+    .sort((a, b) => b.requestCount - a.requestCount || a.model.localeCompare(b.model));
+}
 
 /**
  * Effective bucket width for the trend: the requested `bucketMs` unless the
@@ -223,6 +244,7 @@ export function queryUsage(
       cost: costDisplay(filtered),
     },
     trend: buildTrend(filtered, filters),
+    byModel: buildByModel(filtered),
     dimensions: {
       providers: distinctSorted(filtered.map((record) => record.provider)),
       models: distinctSorted(filtered.map((record) => record.model)),

@@ -261,3 +261,60 @@ describe("duplicate recordId never double counts (DC7)", () => {
     expect(result.totals.requestCount).toBe(1);
   });
 });
+
+describe("per-model aggregates (byModel)", () => {
+  it("aggregates requestCount and totalTokens per model", () => {
+    const records = [
+      makeRecord({ model: "claude-sonnet-4-5", sourceEntryId: "e1", inputTokens: 100, timestampMs: BASE_TS }),
+      makeRecord({ model: "claude-sonnet-4-5", sourceEntryId: "e2", inputTokens: 50, timestampMs: BASE_TS }),
+      makeRecord({ model: "gpt-5-mini", sourceEntryId: "e3", inputTokens: 30, outputTokens: 20, timestampMs: BASE_TS }),
+    ];
+    const result = queryUsage(records, filters(), 1);
+    expect(result.byModel).toEqual([
+      { model: "claude-sonnet-4-5", requestCount: 2, totalTokens: 150 },
+      { model: "gpt-5-mini", requestCount: 1, totalTokens: 50 },
+    ]);
+  });
+
+  it("counts summary tokens but never summary requests", () => {
+    const records = [
+      makeRecord({ model: "claude-sonnet-4-5", sourceEntryId: "a1", inputTokens: 100, timestampMs: BASE_TS }),
+      makeRecord({ sourceKind: "summary", model: "claude-sonnet-4-5", sourceEntryId: "c1", inputTokens: 50, timestampMs: BASE_TS }),
+    ];
+    const result = queryUsage(records, filters({ includeSummaryUsage: true }), 1);
+    expect(result.byModel).toEqual([{ model: "claude-sonnet-4-5", requestCount: 1, totalTokens: 150 }]);
+  });
+
+  it("skips empty model names", () => {
+    const records = [
+      makeRecord({ model: "", sourceEntryId: "e1", inputTokens: 100, timestampMs: BASE_TS }),
+      makeRecord({ model: "gpt-5", sourceEntryId: "e2", inputTokens: 10, timestampMs: BASE_TS }),
+    ];
+    const result = queryUsage(records, filters(), 1);
+    expect(result.byModel).toEqual([{ model: "gpt-5", requestCount: 1, totalTokens: 10 }]);
+  });
+
+  it("sorts by requestCount desc, then model name asc (deterministic)", () => {
+    const records = [
+      makeRecord({ model: "zzz", sourceEntryId: "e1", timestampMs: BASE_TS }),
+      makeRecord({ model: "aaa", sourceEntryId: "e2", timestampMs: BASE_TS }),
+      makeRecord({ model: "bbb", sourceEntryId: "e3", timestampMs: BASE_TS }),
+      makeRecord({ model: "bbb", sourceEntryId: "e4", timestampMs: BASE_TS }),
+    ];
+    const result = queryUsage(records, filters(), 1);
+    expect(result.byModel.map((entry) => entry.model)).toEqual(["bbb", "aaa", "zzz"]);
+  });
+
+  it("model sums match the overall totals (AC4)", () => {
+    const records = [
+      makeRecord({ model: "claude-sonnet-4-5", sourceEntryId: "e1", inputTokens: 100, outputTokens: 40, cacheReadTokens: 30, cacheWriteTokens: 5, timestampMs: BASE_TS }),
+      makeRecord({ sourceKind: "summary", model: "claude-sonnet-4-5", sourceEntryId: "c1", inputTokens: 50, timestampMs: BASE_TS }),
+      makeRecord({ model: "gpt-5-mini", sourceEntryId: "e2", inputTokens: 30, outputTokens: 20, timestampMs: BASE_TS }),
+    ];
+    const result = queryUsage(records, filters({ includeSummaryUsage: true }), 1);
+    const sumRequests = result.byModel.reduce((sum, entry) => sum + entry.requestCount, 0);
+    const sumTokens = result.byModel.reduce((sum, entry) => sum + entry.totalTokens, 0);
+    expect(sumRequests).toBe(result.totals.requestCount);
+    expect(sumTokens).toBe(result.totals.totalTokens);
+  });
+});

@@ -5,8 +5,11 @@
  * - `/pi-usage-statistics` command opens this embedded dashboard; scope
  *   defaults to `global` and can be switched to `project` (records of the
  *   current cwd).
- * - Keys: `p`/`g` scope switch, `s` series-visibility cycle, `t` time-range
+ * - Keys: `p`/`g` scope switch, `s` curve-view toggle, `t` time-range
  *   cycle (今天 → 7天 → 30天 → 全部), `q` close, `Esc` back.
+ * - Dual views: the default text view renders the metric rows with icons on
+ *   the left and the per-model request/token table on the right; `[s]`
+ *   switches to a curve-only view (all six series, no text) and back.
  * - Trend curves: one bar row per series (total, input, output, cache read,
  *   cache write, cost) with a per-series legend value; series visibility and
  *   time range both recompute from the same `store.query` path (TC1).
@@ -22,13 +25,10 @@
 import type { UsageFilters, UsageQueryResult, TrendPoint } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
-import { formatCost, formatTokens, scopeLabel, timeRangeLabel, trendBar, truncateToWidth } from "./format";
+import { displayWidth, formatCost, formatTokens, scopeLabel, timeRangeLabel, trendBar, truncateToWidth } from "./format";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
-
-/** Which trend series rows are visible. */
-export type SeriesMode = "all" | "tokens" | "cost";
 
 /** Relative time window applied via `filters.fromMs`. */
 export type TimeRange = "today" | "7d" | "30d" | "all";
@@ -81,7 +81,6 @@ const rangeFromMs = (range: TimeRange, now: number): number => {
 };
 
 const NEXT_RANGE: Record<TimeRange, TimeRange> = { today: "7d", "7d": "30d", "30d": "all", all: "today" };
-const NEXT_SERIES: Record<SeriesMode, SeriesMode> = { all: "tokens", tokens: "cost", cost: "all" };
 
 /** Build query filters from scope + time range; single decode point. */
 export function filtersFor(scope: Scope, timeRange: TimeRange, projectCwd: string, now: number): UsageFilters {
@@ -122,15 +121,36 @@ const seriesValues = (trend: readonly TrendPoint[], key: SeriesKey): number[] =>
 const KEY_QUIT = "q";
 const KEY_ESC = "\u001b";
 const KEY_ESC_NAME = "escape";
+
+/** Metric rows of the text view; each carries an icon (emoji or narrow fallback). */
+export type MetricKey = "requests" | "total" | "input" | "output" | "cacheWrite" | "cacheRead" | "cacheHit" | "cost";
+
+/** Icon table: emoji on wide terminals, single-color symbols below the threshold. */
+const METRIC_ICONS: Record<MetricKey, { emoji: string; symbol: string }> = {
+  requests: { emoji: "📨", symbol: "▣" },
+  total: { emoji: "🪙", symbol: "▤" },
+  input: { emoji: "📥", symbol: "▥" },
+  output: { emoji: "📤", symbol: "▦" },
+  cacheWrite: { emoji: "💾", symbol: "▧" },
+  cacheRead: { emoji: "📚", symbol: "▨" },
+  cacheHit: { emoji: "⚡", symbol: "▩" },
+  cost: { emoji: "💰", symbol: "◆" },
+};
+
+const ICON_EMOJI_MIN_WIDTH = 60;
+const SPLIT_MIN_WIDTH = 60;
+
+const iconFor = (key: MetricKey, width: number): string =>
+  width >= ICON_EMOJI_MIN_WIDTH ? METRIC_ICONS[key]!.emoji : METRIC_ICONS[key]!.symbol;
 /**
  * Embedded usage dashboard. Key bindings:
- * `p`/`g` scope, `s` series visibility, `t` time range, `q` close, `Esc` back.
+ * `p`/`g` scope, `s` curve-view toggle, `t` time range, `q` close, `Esc` back.
  */
 export class UsageDashboardComponent {
   private state: OverlayState = { kind: "loading" };
   private scope: Scope;
   private timeRange: TimeRange = "today";
-  private seriesMode: SeriesMode = "all";
+  private curvesVisible = false;
   private completed = false;
   constructor(
     private readonly deps: OverlayDeps,
@@ -150,8 +170,8 @@ export class UsageDashboardComponent {
     return this.timeRange;
   }
 
-  get currentSeriesMode(): SeriesMode {
-    return this.seriesMode;
+  get isCurvesVisible(): boolean {
+    return this.curvesVisible;
   }
 
   private refresh(): void {
@@ -181,7 +201,7 @@ export class UsageDashboardComponent {
         }
         break;
       case "s":
-        this.seriesMode = NEXT_SERIES[this.seriesMode];
+        this.curvesVisible = !this.curvesVisible;
         this.requestRender();
         break;
       case "t":
@@ -215,50 +235,90 @@ export class UsageDashboardComponent {
       lines.push(this.theme.muted(truncateToWidth(this.state.message, w)));
     } else {
       const result = this.state.result;
-      if (result.totals.requestCount === 0 && result.totals.totalTokens === 0) {
-        lines.push(this.theme.normal("No usage data in the selected range."));
+      if (this.curvesVisible) {
+        this.renderSeries(lines, result, w);
+      } else {
+        if (result.totals.requestCount === 0 && result.totals.totalTokens === 0) {
+          lines.push(this.theme.normal("No usage data in the selected range."));
+        }
+        this.renderSplitView(lines, result, w);
       }
-      this.renderMetrics(lines, result, w);
-      this.renderSeries(lines, result, w);
     }
 
     lines.push(this.theme.muted(truncateToWidth(this.statusLine(), w)));
     return lines.map((line) => truncateToWidth(line, w));
   }
 
+  /** Text view: metric rows (left column) + per-model table (right column). */
+  private renderSplitView(lines: string[], result: UsageQueryResult, width: number): void {
+    const left: string[] = [];
+    this.renderMetrics(left, result, width);
+    if (width < SPLIT_MIN_WIDTH) {
+      lines.push(...left);
+      lines.push(...this.modelLines(result, width, false));
+      return;
+    }
+    const leftW = Math.min(36, Math.floor(width / 2));
+    const rightW = width - leftW - 1;
+    const right = this.modelLines(result, rightW, true);
+    const rows = Math.max(left.length, right.length);
+    for (let i = 0; i < rows; i++) {
+      const l = truncateToWidth(left[i] ?? "", leftW);
+      const r = truncateToWidth(right[i] ?? "", rightW);
+      lines.push(r === "" ? l : `${l} ${r}`);
+    }
+  }
+
+  /** Per-model table rows; narrow mode renders a compact list without header. */
+  private modelLines(result: UsageQueryResult, width: number, withHeader: boolean): string[] {
+    const models = result.byModel;
+    const lines: string[] = [];
+    if (models.length === 0) return lines;
+    const reqMax = Math.max(8, ...models.map((entry) => formatTokens(entry.requestCount).length));
+    const tokMax = Math.max(6, ...models.map((entry) => formatTokens(entry.totalTokens).length));
+    const nameMax = Math.max(6, Math.min(Math.max(...models.map((entry) => entry.model.length)), Math.max(10, width - reqMax - tokMax - 4)));
+    if (withHeader) {
+      const header = "model".padEnd(nameMax) + "requests".padStart(reqMax + 2) + "tokens".padStart(tokMax + 2);
+      lines.push(truncateToWidth(header, width));
+    }
+    for (const entry of models) {
+      const name = truncateToWidth(entry.model, nameMax);
+      const rowText =
+        name.padEnd(nameMax) +
+        formatTokens(entry.requestCount).padStart(reqMax + 2) +
+        formatTokens(entry.totalTokens).padStart(tokMax + 2);
+      lines.push(truncateToWidth(rowText, width));
+    }
+    return lines;
+  }
+
   private renderMetrics(lines: string[], result: UsageQueryResult, width: number): void {
     const totals = result.totals;
     const labelWidth = Math.min(14, Math.max(0, Math.floor(width / 3)));
-    const row = (label: string, value: string, style: (s: string) => string = this.theme.normal): void => {
-      const padded = label.padEnd(labelWidth);
-      lines.push(truncateToWidth(`${padded}${style(value)}`, width));
+    const row = (key: MetricKey, label: string, value: string, style: (s: string) => string = this.theme.normal): void => {
+      const padded = `${iconFor(key, width)} ${label.padEnd(labelWidth)}`;
+      // Budget the value column from the padded prefix so color is applied
+      // only to the already-truncated value (spec: color after truncation).
+      const valueCol = Math.max(0, width - displayWidth(padded));
+      lines.push(`${padded}${style(truncateToWidth(value, valueCol))}`);
     };
-    row("requests", formatTokens(totals.requestCount));
-    row("total tokens", formatTokens(totals.totalTokens));
-    if (width >= 60) {
-      row("input", formatTokens(totals.inputTokens));
-      row("output", formatTokens(totals.outputTokens));
-      row("cache write", formatTokens(totals.cacheWriteTokens));
-      row("cache read", formatTokens(totals.cacheReadTokens));
-    }
-    row("cache hit", totals.cacheHitRate === null ? "--" : `${totals.cacheHitRate.toFixed(1)}%`);
-    row("cost", formatCost(totals.cost), this.theme.selected);
+    row("requests", "requests", formatTokens(totals.requestCount));
+    row("total", "total tokens", formatTokens(totals.totalTokens));
+    row("input", "input", formatTokens(totals.inputTokens));
+    row("output", "output", formatTokens(totals.outputTokens));
+    row("cacheWrite", "cache write", formatTokens(totals.cacheWriteTokens));
+    row("cacheRead", "cache read", formatTokens(totals.cacheReadTokens));
+    row("cacheHit", "cache hit", totals.cacheHitRate === null ? "--" : `${totals.cacheHitRate.toFixed(1)}%`);
+    row("cost", "cost", formatCost(totals.cost), this.theme.selected);
   }
 
   private renderSeries(lines: string[], result: UsageQueryResult, width: number): void {
-    const visible: SeriesKey[] =
-      this.seriesMode === "cost"
-        ? ["cost"]
-        : this.seriesMode === "tokens"
-          ? ["total", "input", "output", "cacheRead", "cacheWrite"]
-          : [...SERIES_KEYS];
-    // Narrow terminals keep only the headline series.
-    const effective = width < 60 ? visible.filter((key) => key === "total" || key === "cost") : visible;
-
+    // All six series on every width; the bar span shrinks on narrow terminals
+    // and truncateToWidth keeps the row in bounds (no series filtering).
     const labelWidth = 11;
     const sumWidth = 14;
     const barWidth = Math.max(1, width - labelWidth - sumWidth);
-    for (const key of effective) {
+    for (const key of SERIES_KEYS) {
       const values = seriesValues(result.trend, key);
       const sum = key === "cost" ? formatCost(result.totals.cost) : formatTokens(values.reduce((a, b) => a + b, 0));
       const bars = trendBar(values, barWidth);
@@ -270,8 +330,7 @@ export class UsageDashboardComponent {
   private statusLine(): string {
     const scope = scopeLabel(this.scope);
     const time = timeRangeLabel(this.timeRange);
-    const series = this.seriesMode === "all" ? "全部" : this.seriesMode === "tokens" ? "Tokens" : "成本";
-    return `范围: ${scope} · 时间: ${time} · 系列: ${series} · [p]项目 [g]全局 [s]系列 [t]时间 [q]关闭 [ESC]back`;
+    return `范围: ${scope} · 时间: ${time} · [p]项目 [g]全局 [s]曲线 [t]时间 [q]关闭 [ESC]back`;
   }
 }
 
