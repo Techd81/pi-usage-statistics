@@ -3,8 +3,15 @@
   "version": "0.1.0",
   "description": "Pi extension collecting token usage, cost, and cache-hit statistics across sessions, with a native TUI dashboard.",
   "type": "module",
-  "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Techd81/pi-usage-statistics.git"
+  },
+  "homepage": "https://github.com/Techd81/pi-usage-statistics",
+  "bugs": {
+    "url": "https://github.com/Techd81/pi-usage-statistics/issues"
+  },
   "files": [
     "src",
     "README.md",
@@ -16,7 +23,11 @@
     "token-usage",
     "statistics",
     "cost",
-    "usage"
+    "usage",
+    "tui",
+    "dashboard",
+    "cache-hit",
+    "pricing"
   ],
   "pi": {
     "extensions": ["./src/extension.ts"]

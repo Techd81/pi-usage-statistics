@@ -1,81 +1,83 @@
 # Pi Token Usage Statistics
 
-在 Pi 终端内查看 token 使用统计的插件：统计各 provider / 模型的实际消耗，区分 input / output / cache 读写，计算缓存命中率与成本，并支持**项目级 / 全局级**范围切换与多系列趋势曲线。**纯本地运行，无浏览器、无 HTTP 服务器、无任何远程上报。**
+> Track token usage, cost, and cache-hit statistics for the [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) — with a native TUI dashboard.
 
-## 功能
+在 Pi 终端内查看 token 使用统计的扩展：按 provider / 模型统计实际消耗，区分 input / output / cache 读写，计算缓存命中率与成本，支持项目级 / 全局级范围切换与多系列趋势曲线。**纯本地运行，无浏览器、无 HTTP 服务器、无任何远程上报。**
 
-- 自动采集每次完整回复的 token 用量（不会把流式增量算成多次请求）
-- 聚合全部本地 Pi 会话：总 token、请求数、成本、input / output / cache 创建 / cache 命中 / 命中率
-- `/pi-usage-statistics` 打开终端交互视图，支持：
+## Features / 功能
 
-  | 按键 | 作用 |
-  |------|------|
-  | `p` / `g` | 项目级 / 全局级范围切换 |
-  | `s` | 系列可见性循环（全部 → Tokens → 成本） |
-  | `t` | 时间范围循环（今天 → 7天 → 30天 → 全部） |
-  | `q` / `Esc` | 关闭 |
+- **Accurate collection** — each completed assistant reply is counted once; streaming increments are never double-counted
+- **Aggregates across all local Pi sessions** — total tokens, requests, cost, input / output / cache-create / cache-hit, and hit rate
+- **Native TUI dashboard** — `/pi-usage-statistics` opens an embedded interactive view
 
-- 多系列趋势：total / input / output / cache read / cache write / cost 每系列一行柱状条 + 图例值
-- 成本溯源：优先使用 Pi 记录的成本，缺失时按内置价格表估算（带 `~` 标记），无价格时显示 `--`
+  | Key / 按键 | Action / 作用 |
+  |---|---|
+  | `p` / `g` | Toggle project / global scope |
+  | `s` | Cycle series visibility (All → Tokens → Cost) |
+  | `t` | Cycle time range (Today → 7 days → 30 days → All) |
+  | `q` / `Esc` | Close |
 
-## 安装
+- **Multi-series trends** — one bar row per series (total / input / output / cache read / cache write / cost) with per-series legend values
+- **Cost traceability** — recorded cost from Pi when available; otherwise estimated via the built-in price table (marked `~`); `--` when no price exists
 
-### 通过本地路径
+## Installation / 安装
+
+Requires Pi `>= 0.84.0` and Node.js `>= 22.19.0`.
+
+### npm
+
+```bash
+pi install npm:pi-token-usage-statistics
+```
+
+### Git
+
+```bash
+pi install git:github.com/Techd81/pi-usage-statistics
+```
+
+### Local path / 本地路径
 
 ```bash
 pi install /path/to/pi-token-usage-statistics
 ```
 
-### 通过 npm / git
+Restart Pi after installing (extensions initialize at session start). Use `pi list` to view installed extensions and `pi config` to enable / disable them.
 
-```bash
-# npm
-pi install npm:pi-token-usage-statistics
-# git
-pi install git:github.com/<you>/pi-token-usage-statistics
-```
+## Usage / 使用
 
-安装后重启 Pi 生效（扩展在会话启动时初始化）。用 `pi list` 查看已安装扩展，用 `pi config` 启用/禁用。
-
-## 要求
-
-- Pi `>= 0.84.0`
-- Node.js `>= 22.19.0`
-
-## 使用
-
-在 Pi 中直接输入：
+Type the command in a Pi session:
 
 ```
-/pi-usage-statistics           # 打开 TUI 视图（默认全局范围）
-/pi-usage-statistics project   # 项目级范围（仅当前工作目录的会话）
-/pi-usage-statistics global    # 全局范围（所有本地会话）
-/pi-usage-statistics refresh   # 重新扫描会话文件
+/pi-usage-statistics           # open the TUI dashboard (default: global scope)
+/pi-usage-statistics project   # project scope (sessions under the current working directory)
+/pi-usage-statistics global    # global scope (all local sessions)
+/pi-usage-statistics refresh   # force a rescan of session files
 ```
 
-- **项目级**：只统计当前工作目录下的会话记录
-- **全局级**：统计 `~/.pi/agent/sessions/` 下发现的所有会话
+- **Project scope**: only session records under the current working directory
+- **Global scope**: all sessions discovered under `~/.pi/agent/sessions/`
 
-非交互模式（`print` / `json`）下命令输出纯文本摘要，不调用任何 TUI 接口。
+In non-interactive modes (`print` / `json`) the command prints a plain-text summary and never touches the TUI.
 
-## 数据与隐私
+## Data & Privacy / 数据与隐私
 
-- 数据全部存储在本地：`<agent-dir>/token-usage-statistics/`（`records.jsonl` + `index.json`）
-- 唯一的权威数据源是 Pi 自己的会话文件（JSONL）；本插件索引只是可重建的加速缓存
-- **没有任何网络请求**：不启动服务器、不加载 CDN、不上报任何遥测
-- 会话文件由 Pi 自身维护，插件只读取并做本地聚合
+- All data stays local: `<agent-dir>/token-usage-statistics/` (`records.jsonl` + `index.json`)
+- The single source of truth is Pi's own session files (JSONL); this extension's index is only a rebuildable acceleration cache
+- **No network requests**: no server, no CDN, no telemetry
+- Session files are maintained by Pi itself; the extension only reads and aggregates them locally
 
-## 成本估算与价格覆盖
+## Cost Estimation & Price Overrides / 成本估算与价格覆盖
 
-成本优先级：
+Cost priority:
 
-1. **记录成本**（`recorded`）：Pi 消息中自带的 `cost` 字段，经校验后直接使用
-2. **估算成本**（`estimated`）：按内置版本化价格表计算，界面以 `~$x.xxxx（估算）` 标记
-3. **不可用**（`unavailable`）：无价格记录时显示 `--`，token 统计不受影响
+1. **Recorded** — Pi's own `cost` field, validated and used directly
+2. **Estimated** — computed from the built-in versioned price table; shown as `~$x.xxxx (estimated)`
+3. **Unavailable** — `--` when no price exists; token statistics are unaffected
 
-### 价格覆盖文件
+### Price override file
 
-在数据目录下放置 `pricing.json` 可覆盖默认价格：
+Place a `pricing.json` in the data directory to override default prices:
 
 ```json
 {
@@ -87,29 +89,29 @@ pi install git:github.com/<you>/pi-token-usage-statistics
 }
 ```
 
-- `model` 支持 `*` 通配符
-- 单位为每 1k token 的 USD
-- 覆盖文件与内置表合并，覆盖优先
+- `model` supports the `*` wildcard
+- Prices are USD per 1k tokens
+- The override file is merged with the built-in table; overrides take precedence
 
-## 索引重建 / 重置
+## Index Rebuild / Reset / 索引重建
 
-索引损坏或需要重算时，删除数据目录即可（下次会话启动会从会话文件全量重建）：
+Delete the data directory to rebuild the index from session files on next start:
 
 ```bash
 rm -rf ~/.pi/agent/token-usage-statistics
 ```
 
-重建过程非致命：损坏的会话文件会被跳过并计数，不会终止 Pi。
+Rebuilding is non-fatal: corrupted session files are skipped and counted, never fatal to Pi.
 
-## 开发
+## Development / 开发
 
 ```bash
 npm install
-npm test           # 全量测试（vitest）
-npm run typecheck  # 类型检查
-npm pack --dry-run # 打包内容预览
+npm test           # full test suite (vitest)
+npm run typecheck  # type checking
+npm pack --dry-run # preview package contents
 ```
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
