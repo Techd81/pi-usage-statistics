@@ -5,18 +5,21 @@
  * - `/pi-usage-statistics` command opens this embedded dashboard; scope
  *   defaults to `global` and can be switched to `project` (records of the
  *   current cwd).
- * - Keys: `p`/`g` scope switch, `s` curve-view toggle, `t` time-range
- *   cycle (今天 → 7天 → 30天 → 全部), `q` close, `Esc` back.
- * - Dual views: the default text view renders the metric rows with icons on
- *   the left and the per-model models/requests/tokens/cost table on the
- *   right (strict equal split after a 1-col gutter); `[s]` switches to a
- *   curve-only view (all six series, no text) and back.
+ * - Keys: `p`/`g` scope switch, `m` models-view toggle, `t` time-range
+ *   cycle (今天 → 7天 → 30天 → 全部), `Esc` back (models → main first,
+ *   then close).
+ * - Dual views: the default main view shows a hero Total tokens + Requests/
+ *   Cost summary, five metric slots (Input / Output / Cache write / Cache
+ *   read / Cache hit with progress bar), and the Usage trend series below;
+ *   `[m]` switches to a full-width per-model table (models / requests /
+ *   tokens / cost) and back. Narrow terminals stack the main blocks
+ *   vertically.
  * - Trend curves: one bar row per series (total, input, output, cache read,
  *   cache write, cost) with a per-series legend value; series visibility and
  *   time range both recompute from the same `store.query` path (TC1).
- * - Narrow widths hide secondary rows and truncate labels; render() never
- *   throws on overflow (TC2/TC3). Loading/error/empty/estimated/unavailable
- *   states render distinctly (TC3/TC4).
+ * - Narrow widths truncate labels; render() never throws on overflow
+ *   (TC2/TC3). Loading/error/empty/estimated/unavailable states render
+ *   distinctly (TC3/TC4).
  *
  * The component satisfies Pi's `Component` structural interface
  * (`render(width): string[]`, `handleInput?`, `invalidate()`) with zero
@@ -26,13 +29,29 @@
 import type { UsageFilters, UsageQueryResult, TrendPoint } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
-import { displayWidth, formatCost, formatTokens, padStartToWidth, padToWidth, scopeLabel, timeRangeLabel, trendBar, truncateToWidth } from "./format";
+import {
+  displayWidth,
+  formatCompactTokens,
+  formatCost,
+  formatHitRate,
+  formatTokens,
+  hitRateBar,
+  padStartToWidth,
+  padToWidth,
+  scopeLabel,
+  timeRangeLabel,
+  trendBar,
+  truncateToWidth,
+} from "./format";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
 
 /** Relative time window applied via `filters.fromMs`. */
 export type TimeRange = "today" | "7d" | "30d" | "all";
+
+/** Presentation view: hero+metrics+trend, or the per-model table. */
+export type ViewMode = "main" | "models";
 
 /** Color functions consumed by the component; injectable for tests. */
 export type DashboardTheme = {
@@ -119,39 +138,28 @@ const seriesValues = (trend: readonly TrendPoint[], key: SeriesKey): number[] =>
   }
 };
 
-const KEY_QUIT = "q";
 const KEY_ESC = "\u001b";
 const KEY_ESC_NAME = "escape";
 
-/** Metric rows of the text view; each carries an icon (emoji or narrow fallback). */
-export type MetricKey = "requests" | "total" | "input" | "output" | "cacheWrite" | "cacheRead" | "cacheHit" | "cost";
+/** Wide layout uses a side-by-side hero/summary + five metric slots. */
+const WIDE_MIN_WIDTH = 60;
 
-/** Icon table: emoji on wide terminals, single-color symbols below the threshold. */
-const METRIC_ICONS: Record<MetricKey, { emoji: string; symbol: string }> = {
-  requests: { emoji: "📨", symbol: "▣" },
-  total: { emoji: "🪙", symbol: "▤" },
-  input: { emoji: "📥", symbol: "▥" },
-  output: { emoji: "📤", symbol: "▦" },
-  cacheWrite: { emoji: "💾", symbol: "▧" },
-  cacheRead: { emoji: "📚", symbol: "▨" },
-  cacheHit: { emoji: "⚡", symbol: "▩" },
-  cost: { emoji: "💰", symbol: "◆" },
-};
+const METRIC_SLOTS = [
+  { key: "input", label: "Input", value: (r: UsageQueryResult) => formatTokens(r.totals.inputTokens) },
+  { key: "output", label: "Output", value: (r: UsageQueryResult) => formatTokens(r.totals.outputTokens) },
+  { key: "cacheWrite", label: "Cache write", value: (r: UsageQueryResult) => formatTokens(r.totals.cacheWriteTokens) },
+  { key: "cacheRead", label: "Cache read", value: (r: UsageQueryResult) => formatTokens(r.totals.cacheReadTokens) },
+] as const;
 
-const ICON_EMOJI_MIN_WIDTH = 60;
-const SPLIT_MIN_WIDTH = 60;
-
-const iconFor = (key: MetricKey, width: number): string =>
-  width >= ICON_EMOJI_MIN_WIDTH ? METRIC_ICONS[key]!.emoji : METRIC_ICONS[key]!.symbol;
 /**
  * Embedded usage dashboard. Key bindings:
- * `p`/`g` scope, `s` curve-view toggle, `t` time range, `q` close, `Esc` back.
+ * `p`/`g` scope, `m` models view, `t` time range, `Esc` back/close.
  */
 export class UsageDashboardComponent {
   private state: OverlayState = { kind: "loading" };
   private scope: Scope;
   private timeRange: TimeRange = "today";
-  private curvesVisible = false;
+  private viewMode: ViewMode = "main";
   private completed = false;
   constructor(
     private readonly deps: OverlayDeps,
@@ -171,8 +179,8 @@ export class UsageDashboardComponent {
     return this.timeRange;
   }
 
-  get isCurvesVisible(): boolean {
-    return this.curvesVisible;
+  get currentViewMode(): ViewMode {
+    return this.viewMode;
   }
 
   private refresh(): void {
@@ -201,8 +209,8 @@ export class UsageDashboardComponent {
           this.requestRender();
         }
         break;
-      case "s":
-        this.curvesVisible = !this.curvesVisible;
+      case "m":
+        this.viewMode = this.viewMode === "main" ? "models" : "main";
         this.requestRender();
         break;
       case "t":
@@ -210,9 +218,13 @@ export class UsageDashboardComponent {
         this.refresh();
         this.requestRender();
         break;
-      case KEY_QUIT:
       case KEY_ESC:
       case KEY_ESC_NAME:
+        if (this.viewMode === "models") {
+          this.viewMode = "main";
+          this.requestRender();
+          break;
+        }
         if (!this.completed) {
           this.completed = true;
           this.onDone();
@@ -236,13 +248,13 @@ export class UsageDashboardComponent {
       lines.push(this.theme.muted(truncateToWidth(this.state.message, w)));
     } else {
       const result = this.state.result;
-      if (this.curvesVisible) {
-        this.renderSeries(lines, result, w);
+      if (this.viewMode === "models") {
+        this.renderModelsView(lines, result, w);
       } else {
         if (result.totals.requestCount === 0 && result.totals.totalTokens === 0) {
           lines.push(this.theme.normal("No usage data in the selected range."));
         }
-        this.renderSplitView(lines, result, w);
+        this.renderMainView(lines, result, w);
       }
     }
 
@@ -250,28 +262,120 @@ export class UsageDashboardComponent {
     return lines.map((line) => truncateToWidth(line, w));
   }
 
-  /** Text view: metric rows (left column) + per-model table (right column). */
-  private renderSplitView(lines: string[], result: UsageQueryResult, width: number): void {
-    if (width < SPLIT_MIN_WIDTH) {
-      this.renderMetrics(lines, result, width, width);
-      lines.push(...this.modelLines(result, width, false));
+  /** Default main view: hero + metric slots + usage trend (no model table). */
+  private renderMainView(lines: string[], result: UsageQueryResult, width: number): void {
+    if (width < WIDE_MIN_WIDTH) {
+      this.renderMainNarrow(lines, result, width);
+    } else {
+      this.renderMainWide(lines, result, width);
+    }
+    lines.push(this.theme.selected(truncateToWidth("Usage trend", width)));
+    this.renderSeries(lines, result, width);
+  }
+
+  /** Wide: hero left, Requests/Cost right, five equal metric slots below. */
+  private renderMainWide(lines: string[], result: UsageQueryResult, width: number): void {
+    const totals = result.totals;
+    const heroLabel = "Total tokens";
+    const heroValue = formatTokens(totals.totalTokens);
+    const heroSub = `~ ${formatCompactTokens(totals.totalTokens)}`;
+    const reqLabel = "Requests";
+    const reqValue = formatTokens(totals.requestCount);
+    const costLabel = "Cost";
+    const costValue = formatCost(totals.cost);
+
+    const rightReq = `${reqLabel}  ${reqValue}`;
+    const rightCost = `${costLabel}  ${costValue}`;
+    const rightW = Math.max(displayWidth(rightReq), displayWidth(rightCost), 12);
+    const leftW = Math.max(0, width - rightW - 1);
+
+    // Budget plain-text columns first; apply color only after truncation.
+    const leftLabel = padToWidth(truncateToWidth(heroLabel, leftW), leftW);
+    const rightReqCell = padStartToWidth(truncateToWidth(rightReq, rightW), rightW);
+    lines.push(`${this.theme.muted(leftLabel)} ${this.theme.normal(rightReqCell)}`);
+
+    const leftValue = padToWidth(truncateToWidth(heroValue, leftW), leftW);
+    const rightCostCell = padStartToWidth(truncateToWidth(rightCost, rightW), rightW);
+    lines.push(`${this.theme.selected(leftValue)} ${this.theme.normal(rightCostCell)}`);
+
+    const leftSub = padToWidth(truncateToWidth(heroSub, leftW), leftW);
+    const rightBlank = " ".repeat(rightW);
+    lines.push(`${this.theme.muted(leftSub)} ${rightBlank}`);
+
+    lines.push(...this.metricSlotRows(result, width));
+  }
+
+  /** Narrow: vertical stack — hero → Requests/Cost → metrics → (trend outside). */
+  private renderMainNarrow(lines: string[], result: UsageQueryResult, width: number): void {
+    const totals = result.totals;
+    lines.push(this.theme.muted(truncateToWidth("Total tokens", width)));
+    lines.push(this.theme.selected(truncateToWidth(formatTokens(totals.totalTokens), width)));
+    lines.push(this.theme.muted(truncateToWidth(`~ ${formatCompactTokens(totals.totalTokens)}`, width)));
+    lines.push(this.theme.normal(truncateToWidth(`Requests  ${formatTokens(totals.requestCount)}`, width)));
+    lines.push(this.theme.normal(truncateToWidth(`Cost  ${formatCost(totals.cost)}`, width)));
+
+    for (const slot of METRIC_SLOTS) {
+      const row = `${slot.label}  ${slot.value(result)}`;
+      lines.push(this.theme.normal(truncateToWidth(row, width)));
+    }
+    const hitPct = formatHitRate(totals.cacheHitRate);
+    const hitPrefix = `Cache hit  ${hitPct} `;
+    const barW = Math.max(0, width - displayWidth(hitPrefix));
+    const bar = hitRateBar(totals.cacheHitRate, barW);
+    lines.push(this.theme.normal(truncateToWidth(`${hitPrefix}${bar}`.trimEnd(), width)));
+  }
+
+  /**
+   * Five equal-width metric slots on one or two rows. Cache hit includes a
+   * percent + block progress bar; column widths differ by at most 1.
+   */
+  private metricSlotRows(result: UsageQueryResult, width: number): string[] {
+    const slots = 5;
+    const base = Math.floor(width / slots);
+    const rem = width - base * slots;
+    const widths = Array.from({ length: slots }, (_, i) => base + (i < rem ? 1 : 0));
+
+    const totals = result.totals;
+    const labels = ["Input", "Output", "Cache write", "Cache read", "Cache hit"];
+    const values = [
+      formatTokens(totals.inputTokens),
+      formatTokens(totals.outputTokens),
+      formatTokens(totals.cacheWriteTokens),
+      formatTokens(totals.cacheReadTokens),
+      formatHitRate(totals.cacheHitRate),
+    ];
+
+    const labelRow = labels
+      .map((label, i) => padToWidth(truncateToWidth(label, widths[i]!), widths[i]!))
+      .join("");
+    const valueCells = values.map((value, i) => {
+      const w = widths[i]!;
+      if (i < 4) return padToWidth(truncateToWidth(value, w), w);
+      // Cache hit: percent + bar in the remaining slot width.
+      const pct = value;
+      const gap = " ";
+      const prefixW = displayWidth(pct) + displayWidth(gap);
+      const barW = Math.max(0, w - prefixW);
+      const cell = `${pct}${gap}${hitRateBar(totals.cacheHitRate, barW)}`;
+      return padToWidth(truncateToWidth(cell, w), w);
+    });
+    const valueRow = valueCells.join("");
+    return [this.theme.muted(labelRow), this.theme.normal(valueRow)];
+  }
+
+  /** Full-width per-model table (four columns). */
+  private renderModelsView(lines: string[], result: UsageQueryResult, width: number): void {
+    const modelRows = this.modelLines(result, width, true);
+    if (modelRows.length === 0) {
+      lines.push(this.theme.muted(truncateToWidth("No models in the selected range.", width)));
       return;
     }
-    const gutterW = 1;
-    const leftW = Math.floor((width - gutterW) / 2);
-    const rightW = width - gutterW - leftW;
-    const left: string[] = [];
-    this.renderMetrics(left, result, leftW, width);
-    const right = this.modelLines(result, rightW, true);
-    const rows = Math.max(left.length, right.length);
-    for (let i = 0; i < rows; i++) {
-      const leftCell = padToWidth(truncateToWidth(left[i] ?? "", leftW), leftW);
-      const rightCell = padToWidth(truncateToWidth(right[i] ?? "", rightW), rightW);
-      lines.push(`${leftCell} ${rightCell}`);
+    for (const row of modelRows) {
+      lines.push(this.theme.normal(row));
     }
   }
 
-  /** Per-model table rows; narrow mode renders a compact list without header. */
+  /** Per-model table rows; `withHeader` adds the four-column header. */
   private modelLines(result: UsageQueryResult, width: number, withHeader: boolean): string[] {
     const models = result.byModel;
     const lines: string[] = [];
@@ -302,49 +406,28 @@ export class UsageDashboardComponent {
     return lines;
   }
 
-  /**
-   * Left-column metric rows. `budget` is the column width for layout;
-   * `terminalWidth` drives emoji vs symbol icons (wide terminal threshold).
-   */
-  private renderMetrics(lines: string[], result: UsageQueryResult, budget: number, terminalWidth: number): void {
-    const totals = result.totals;
-    const labelWidth = Math.min(14, Math.max(0, Math.floor(budget / 3)));
-    const row = (key: MetricKey, label: string, value: string, style: (s: string) => string = this.theme.normal): void => {
-      const padded = `${iconFor(key, terminalWidth)} ${label.padEnd(labelWidth)}`;
-      // Budget the value column from the padded prefix so color is applied
-      // only to the already-truncated value (spec: color after truncation).
-      const valueCol = Math.max(0, budget - displayWidth(padded));
-      lines.push(`${padded}${style(truncateToWidth(value, valueCol))}`);
-    };
-    row("requests", "requests", formatTokens(totals.requestCount));
-    row("total", "total tokens", formatTokens(totals.totalTokens));
-    row("input", "input", formatTokens(totals.inputTokens));
-    row("output", "output", formatTokens(totals.outputTokens));
-    row("cacheWrite", "cache write", formatTokens(totals.cacheWriteTokens));
-    row("cacheRead", "cache read", formatTokens(totals.cacheReadTokens));
-    row("cacheHit", "cache hit", totals.cacheHitRate === null ? "--" : `${totals.cacheHitRate.toFixed(1)}%`);
-    row("cost", "cost", formatCost(totals.cost), this.theme.selected);
-  }
-
   private renderSeries(lines: string[], result: UsageQueryResult, width: number): void {
     // All six series on every width; the bar span shrinks on narrow terminals
     // and truncateToWidth keeps the row in bounds (no series filtering).
+    // Budget plain columns first (label + sum + 1-col gap + bars = width), then color.
     const labelWidth = 11;
     const sumWidth = 14;
-    const barWidth = Math.max(1, width - labelWidth - sumWidth);
+    const barWidth = Math.max(1, width - labelWidth - sumWidth - 1);
     for (const key of SERIES_KEYS) {
       const values = seriesValues(result.trend, key);
       const sum = key === "cost" ? formatCost(result.totals.cost) : formatTokens(values.reduce((a, b) => a + b, 0));
       const bars = trendBar(values, barWidth);
-      const line = `${key.padEnd(labelWidth)}${sum.padStart(sumWidth)} ${bars}`;
-      lines.push(truncateToWidth(this.theme.normal(line), width));
+      const label = padToWidth(truncateToWidth(key, labelWidth), labelWidth);
+      const sumCell = padStartToWidth(truncateToWidth(sum, sumWidth), sumWidth);
+      const plain = truncateToWidth(`${label}${sumCell} ${bars}`, width);
+      lines.push(this.theme.normal(plain));
     }
   }
 
   private statusLine(): string {
     const scope = scopeLabel(this.scope);
     const time = timeRangeLabel(this.timeRange);
-    return `范围: ${scope} · 时间: ${time} · [p]项目 [g]全局 [s]曲线 [t]时间 [q]关闭 [ESC]back`;
+    return `范围: ${scope} · 时间: ${time} · [p]项目 [g]全局 [m] models [t]时间 [ESC]back`;
   }
 }
 

@@ -31,6 +31,34 @@ export function formatHitRate(rate: number | null): string {
 }
 
 /**
+ * Compact magnitude for the hero subtitle (e.g. `2.57B`, `1.2M`, `3.4K`).
+ * Non-finite / negative inputs collapse to `0`.
+ */
+export function formatCompactTokens(value: number): string {
+  const n = Number.isFinite(value) && value > 0 ? value : 0;
+  const trim = (x: number): string => {
+    const s = x.toFixed(2);
+    return s.replace(/\.?0+$/, "");
+  };
+  if (n >= 1_000_000_000) return `${trim(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${trim(n / 1_000)}K`;
+  return String(Math.floor(n));
+}
+
+/**
+ * Block progress bar for a 0–100 cache-hit rate. `null` or non-positive
+ * width yields `""` so callers can pair it with `--` for the percent.
+ */
+export function hitRateBar(rate: number | null, width: number): string {
+  const w = Number.isFinite(width) ? Math.floor(width) : 0;
+  if (rate === null || w <= 0) return "";
+  const clamped = Math.max(0, Math.min(100, rate));
+  const filled = Math.min(w, Math.round((clamped / 100) * w));
+  return "█".repeat(filled) + "░".repeat(w - filled);
+}
+
+/**
  * Columns for one character: full-width (CJK) characters count as 2,
  * block-drawing elements (U+2580–U+259F, e.g. trend bars) as 1, everything
  * else ASCII as 1. The CJK test is a rough heuristic (any code point above

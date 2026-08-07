@@ -6,9 +6,11 @@
 import { describe, expect, it } from "vitest";
 import {
   displayWidth,
+  formatCompactTokens,
   formatCost,
   formatHitRate,
   formatTokens,
+  hitRateBar,
   padStartToWidth,
   padToWidth,
   trendBar,
@@ -50,6 +52,33 @@ describe("formatHitRate", () => {
     expect(formatHitRate(17.28395)).toBe("17.3%");
     expect(formatHitRate(0)).toBe("0.0%");
     expect(formatHitRate(null)).toBe("--");
+  });
+});
+
+describe("formatCompactTokens", () => {
+  it("uses K/M/B magnitude labels", () => {
+    expect(formatCompactTokens(0)).toBe("0");
+    expect(formatCompactTokens(999)).toBe("999");
+    expect(formatCompactTokens(1_000)).toBe("1K");
+    expect(formatCompactTokens(12_500)).toBe("12.5K");
+    expect(formatCompactTokens(2_570_000_000)).toBe("2.57B");
+    expect(formatCompactTokens(1_200_000)).toBe("1.2M");
+  });
+
+  it("collapses non-finite and negative inputs to 0", () => {
+    expect(formatCompactTokens(Number.NaN)).toBe("0");
+    expect(formatCompactTokens(-5)).toBe("0");
+  });
+});
+
+describe("hitRateBar", () => {
+  it("fills a block bar for 0–100 and returns empty for null/zero width", () => {
+    expect(hitRateBar(null, 10)).toBe("");
+    expect(hitRateBar(50, 0)).toBe("");
+    expect(hitRateBar(0, 4)).toBe("░░░░");
+    expect(hitRateBar(100, 4)).toBe("████");
+    expect(hitRateBar(50, 4)).toBe("██░░");
+    expect(displayWidth(hitRateBar(75, 8))).toBe(8);
   });
 });
 
