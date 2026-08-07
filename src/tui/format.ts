@@ -66,6 +66,30 @@ export function displayWidth(text: string): number {
 }
 
 /**
+ * Pad (or leave as-is) so the visible display width is exactly `width`.
+ * ANSI escape sequences count as zero columns. When the text is already
+ * wider than `width`, it is returned unchanged — callers should truncate
+ * first when a hard cap is required.
+ */
+export function padToWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  const current = displayWidth(text);
+  if (current >= width) return text;
+  return text + " ".repeat(width - current);
+}
+
+/**
+ * Left-pad so the visible display width is exactly `width`. Same ANSI
+ * accounting as `padToWidth`.
+ */
+export function padStartToWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  const current = displayWidth(text);
+  if (current >= width) return text;
+  return " ".repeat(width - current) + text;
+}
+
+/**
  * Truncate to `width` visible columns without breaking a line or splitting
  * an ANSI escape sequence; never throws. Escape sequences count as zero
  * columns and are preserved — including any trailing SGR sequence (e.g. a

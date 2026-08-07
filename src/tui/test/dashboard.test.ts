@@ -30,8 +30,39 @@ async function makeStore(projectCwd = "/projects/p1"): Promise<UsageStore> {
   return store;
 }
 
+/** Store with many models so right-pane rows exceed the left metric count. */
+async function makeManyModelStore(modelCount: number): Promise<UsageStore> {
+  const storeDir = await mkdtemp(join(tmpdir(), "pi-tui-many-"));
+  tempDirs.push(storeDir);
+  const store = new UsageStore({ storeDir });
+  await store.init();
+  const now = Date.now();
+  for (let i = 1; i <= modelCount; i++) {
+    const id = String(i).padStart(2, "0");
+    store.upsertRecord(
+      makeRecord({
+        sessionId: `s${id}`,
+        sourceEntryId: "e1",
+        model: `model-${id}`,
+        timestampMs: now,
+        inputTokens: 10 + i,
+        outputTokens: 5,
+        recordedCost: { input: 0.01 * i, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.01 * i + 0.001 },
+      }),
+    );
+  }
+  return store;
+}
+
 async function makeDeps(initialScope: OverlayDeps["initialScope"] = "global"): Promise<OverlayDeps> {
   return { store: await makeStore(), projectCwd: "/projects/p1", initialScope };
+}
+
+/** Visible column where `needle` starts, or -1 if absent. */
+function visibleStartCol(line: string, needle: string): number {
+  const idx = line.indexOf(needle);
+  if (idx < 0) return -1;
+  return displayWidth(line.slice(0, idx));
 }
 
 afterEach(() => {
@@ -49,10 +80,11 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("🪙 total tokens");
     expect(text).toContain("cache hit");
     expect(text).toContain("💰 cost");
-    // Per-model table: header plus both models with request/token values.
-    expect(text).toContain("model");
+    // Per-model table: four-column header plus both models with request/token/cost values.
+    expect(text).toContain("models");
     expect(text).toContain("requests");
     expect(text).toContain("tokens");
+    expect(text).toMatch(/\bcost\b/);
     expect(text).toContain("claude-sonnet-4-5");
     expect(text).toContain("gpt-5");
     // No curve rows in the default text view.
@@ -61,6 +93,60 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).toContain("范围: 全局");
     expect(text).toContain("时间: 今天");
     expect(text).toContain("[p]项目 [g]全局 [s]曲线 [t]时间 [q]关闭 [ESC]back");
+  });
+
+  it("TC1b: wide view uses equal left/right panes and keeps overflow models in the right half", async () => {
+    const width = 120;
+    const gutterW = 1;
+    const leftW = Math.floor((width - gutterW) / 2);
+    const rightW = width - gutterW - leftW;
+    expect(Math.abs(leftW - rightW)).toBeLessThanOrEqual(1);
+
+    const store = await makeManyModelStore(9);
+    const component = new UsageDashboardComponent({ store, projectCwd: "/projects/p1" });
+    const lines = component.render(width);
+    const text = lines.join("\n");
+
+    // Left pane: exactly the eight summary metrics (cache hit = hit rate).
+    for (const label of [
+      "📨 requests",
+      "🪙 total tokens",
+      "📥 input",
+      "📤 output",
+      "💾 cache write",
+      "📚 cache read",
+      "⚡ cache hit",
+      "💰 cost",
+    ]) {
+      expect(text).toContain(label);
+    }
+    // Right pane: four-column header.
+    const headerLine = lines.find((line) => line.includes("models") && line.includes("requests") && line.includes("tokens") && line.includes("cost"));
+    expect(headerLine).toBeDefined();
+    expect(visibleStartCol(headerLine!, "models")).toBe(leftW + gutterW);
+    expect(displayWidth(headerLine!)).toBe(width);
+
+    // Every model — including the 9th — starts at the same right-pane column.
+    const rightStarts: number[] = [];
+    for (let i = 1; i <= 9; i++) {
+      const id = String(i).padStart(2, "0");
+      const needle = `model-${id}`;
+      const line = lines.find((row) => row.includes(needle));
+      expect(line, `missing ${needle}`).toBeDefined();
+      const start = visibleStartCol(line!, needle);
+      expect(start).toBe(leftW + gutterW);
+      rightStarts.push(start);
+      expect(displayWidth(line!)).toBe(width);
+      // Overflow rows (past the 8 left metrics + after header alignment) keep the left spacer.
+      if (i >= 8) {
+        expect(line!.startsWith(needle)).toBe(false);
+        expect(displayWidth(line!.slice(0, leftW))).toBe(leftW);
+      }
+    }
+    expect(new Set(rightStarts).size).toBe(1);
+
+    // Model cost column uses domain cost formatting (recorded amounts present).
+    expect(text).toMatch(/\$\d+\.\d{4}/);
   });
 
   it("TC2: narrow width falls back to symbol icons, compact model rows, and never throws", async () => {
@@ -80,8 +166,12 @@ describe("UsageDashboardComponent.render", () => {
     expect(text).not.toContain("📨");
     expect(text).not.toContain("🪙");
     expect(text).not.toContain("💰");
-    // Compact model rows still render both models.
-    expect(text).toContain("claude-sonnet-4-5");
+    // Compact model rows still render both models (metrics first, then models).
+    // Narrow width may truncate long model names; match the stable prefix.
+    const metricIdx = text.indexOf("▣ requests");
+    const modelIdx = text.indexOf("claude-sonnet");
+    expect(metricIdx).toBeGreaterThanOrEqual(0);
+    expect(modelIdx).toBeGreaterThan(metricIdx);
     expect(text).toContain("gpt-5");
     for (const line of lines) {
       expect(displayWidth(line)).toBeLessThanOrEqual(40);
@@ -148,14 +238,14 @@ describe("UsageDashboardComponent.handleInput", () => {
     const deps = await makeDeps();
     const component = new UsageDashboardComponent(deps);
     expect(component.isCurvesVisible).toBe(false);
-    const textView = component.render(80).join("\n");
+    const textView = component.render(120).join("\n");
     expect(textView).toContain("📨 requests");
     expect(textView).toContain("claude-sonnet-4-5");
     expect(textView).not.toContain("cacheRead");
 
     component.handleInput("s");
     expect(component.isCurvesVisible).toBe(true);
-    const curveView = component.render(80).join("\n");
+    const curveView = component.render(120).join("\n");
     // Curve view: all six series rows, no metric/model text.
     expect(curveView).toContain("total");
     expect(curveView).toContain("input");
@@ -168,7 +258,7 @@ describe("UsageDashboardComponent.handleInput", () => {
 
     component.handleInput("s");
     expect(component.isCurvesVisible).toBe(false);
-    const restored = component.render(80).join("\n");
+    const restored = component.render(120).join("\n");
     expect(restored).toContain("📨 requests");
     expect(restored).not.toContain("cacheRead");
   });

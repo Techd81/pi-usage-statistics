@@ -106,6 +106,8 @@ export type ModelUsage = {
   /** Finalized assistant responses only; summary usage is excluded (mirrors `totals.requestCount`). */
   requestCount: number;
   totalTokens: number;
+  /** Per-model cost via the same `costDisplay` rules as overall totals. */
+  cost: CostDisplay;
 };
 
 /** Shared query contract consumed by both the web API and the TUI. */

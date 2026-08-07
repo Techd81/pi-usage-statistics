@@ -263,6 +263,8 @@ describe("duplicate recordId never double counts (DC7)", () => {
 });
 
 describe("per-model aggregates (byModel)", () => {
+  const unavailable = { amount: null, status: "unavailable" as const, currency: "USD" as const };
+
   it("aggregates requestCount and totalTokens per model", () => {
     const records = [
       makeRecord({ model: "claude-sonnet-4-5", sourceEntryId: "e1", inputTokens: 100, timestampMs: BASE_TS }),
@@ -271,8 +273,8 @@ describe("per-model aggregates (byModel)", () => {
     ];
     const result = queryUsage(records, filters(), 1);
     expect(result.byModel).toEqual([
-      { model: "claude-sonnet-4-5", requestCount: 2, totalTokens: 150 },
-      { model: "gpt-5-mini", requestCount: 1, totalTokens: 50 },
+      { model: "claude-sonnet-4-5", requestCount: 2, totalTokens: 150, cost: unavailable },
+      { model: "gpt-5-mini", requestCount: 1, totalTokens: 50, cost: unavailable },
     ]);
   });
 
@@ -282,7 +284,7 @@ describe("per-model aggregates (byModel)", () => {
       makeRecord({ sourceKind: "summary", model: "claude-sonnet-4-5", sourceEntryId: "c1", inputTokens: 50, timestampMs: BASE_TS }),
     ];
     const result = queryUsage(records, filters({ includeSummaryUsage: true }), 1);
-    expect(result.byModel).toEqual([{ model: "claude-sonnet-4-5", requestCount: 1, totalTokens: 150 }]);
+    expect(result.byModel).toEqual([{ model: "claude-sonnet-4-5", requestCount: 1, totalTokens: 150, cost: unavailable }]);
   });
 
   it("skips empty model names", () => {
@@ -291,7 +293,7 @@ describe("per-model aggregates (byModel)", () => {
       makeRecord({ model: "gpt-5", sourceEntryId: "e2", inputTokens: 10, timestampMs: BASE_TS }),
     ];
     const result = queryUsage(records, filters(), 1);
-    expect(result.byModel).toEqual([{ model: "gpt-5", requestCount: 1, totalTokens: 10 }]);
+    expect(result.byModel).toEqual([{ model: "gpt-5", requestCount: 1, totalTokens: 10, cost: unavailable }]);
   });
 
   it("sorts by requestCount desc, then model name asc (deterministic)", () => {
@@ -316,5 +318,25 @@ describe("per-model aggregates (byModel)", () => {
     const sumTokens = result.byModel.reduce((sum, entry) => sum + entry.totalTokens, 0);
     expect(sumRequests).toBe(result.totals.requestCount);
     expect(sumTokens).toBe(result.totals.totalTokens);
+  });
+
+  it("aggregates per-model cost with recorded / estimated / mixed / unavailable", () => {
+    const records = [
+      makeRecord({ model: "rec-model", sourceEntryId: "r1", inputTokens: 10, timestampMs: BASE_TS, recordedCost: cost(1, 2, 0, 0) }),
+      makeRecord({ model: "est-model", sourceEntryId: "e1", inputTokens: 10, timestampMs: BASE_TS, estimatedCost: cost(3, 4, 0, 0), costKind: "estimated" }),
+      makeRecord({ model: "mix-model", sourceEntryId: "m1", inputTokens: 10, timestampMs: BASE_TS, recordedCost: cost(1, 0, 0, 0) }),
+      makeRecord({ model: "mix-model", sourceEntryId: "m2", inputTokens: 10, timestampMs: BASE_TS, estimatedCost: cost(2, 0, 0, 0), costKind: "estimated" }),
+      makeRecord({ model: "unavail-model", sourceEntryId: "u1", inputTokens: 10, timestampMs: BASE_TS }),
+      makeRecord({ model: "unavail-model", sourceEntryId: "u2", inputTokens: 5, timestampMs: BASE_TS, recordedCost: cost(1, 0, 0, 0) }),
+    ];
+    const result = queryUsage(records, filters(), 1);
+    const byName = Object.fromEntries(result.byModel.map((entry) => [entry.model, entry.cost]));
+    expect(byName["rec-model"]).toEqual({ amount: 3, status: "recorded", currency: "USD" });
+    expect(byName["est-model"]).toEqual({ amount: 7, status: "estimated", currency: "USD" });
+    expect(byName["mix-model"]).toEqual({ amount: 3, status: "mixed", currency: "USD" });
+    expect(byName["unavail-model"]).toEqual({ amount: null, status: "unavailable", currency: "USD" });
+    // Per-model costs do not change overall totals aggregation.
+    expect(result.totals.totalTokens).toBe(55);
+    expect(result.totals.requestCount).toBe(6);
   });
 });

@@ -4,7 +4,16 @@
  * bounded and deterministic.
  */
 import { describe, expect, it } from "vitest";
-import { displayWidth, formatCost, formatHitRate, formatTokens, trendBar, truncateToWidth } from "../format";
+import {
+  displayWidth,
+  formatCost,
+  formatHitRate,
+  formatTokens,
+  padStartToWidth,
+  padToWidth,
+  trendBar,
+  truncateToWidth,
+} from "../format";
 import type { CostDisplay } from "../../domain";
 
 const cost = (amount: number | null, status: CostDisplay["status"]): CostDisplay => ({
@@ -81,6 +90,26 @@ describe("displayWidth / truncateToWidth", () => {
     const colored = "\u001b[2mabc\u001b[0m";
     expect(truncateToWidth(colored, 1)).toBe("\u001b[2ma\u001b[0m");
     expect(displayWidth(truncateToWidth(colored, 1))).toBe(1);
+  });
+});
+
+describe("padToWidth / padStartToWidth", () => {
+  it("pads to an exact visible width and leaves already-wide text unchanged", () => {
+    expect(padToWidth("ab", 5)).toBe("ab   ");
+    expect(padStartToWidth("ab", 5)).toBe("   ab");
+    expect(padToWidth("abcdef", 4)).toBe("abcdef");
+    expect(padStartToWidth("abcdef", 4)).toBe("abcdef");
+    expect(padToWidth("x", 0)).toBe("");
+    expect(padStartToWidth("x", 0)).toBe("");
+  });
+
+  it("ignores ANSI when measuring and pads CJK by display columns", () => {
+    const colored = "\u001b[31mab\u001b[0m";
+    expect(displayWidth(padToWidth(colored, 5))).toBe(5);
+    expect(padToWidth(colored, 5).endsWith("   ")).toBe(true);
+    expect(displayWidth(padStartToWidth(colored, 5))).toBe(5);
+    expect(padToWidth("中", 4)).toBe("中  ");
+    expect(padStartToWidth("中", 4)).toBe("  中");
   });
 });
 

@@ -8,8 +8,9 @@
  * - Keys: `p`/`g` scope switch, `s` curve-view toggle, `t` time-range
  *   cycle (今天 → 7天 → 30天 → 全部), `q` close, `Esc` back.
  * - Dual views: the default text view renders the metric rows with icons on
- *   the left and the per-model request/token table on the right; `[s]`
- *   switches to a curve-only view (all six series, no text) and back.
+ *   the left and the per-model models/requests/tokens/cost table on the
+ *   right (strict equal split after a 1-col gutter); `[s]` switches to a
+ *   curve-only view (all six series, no text) and back.
  * - Trend curves: one bar row per series (total, input, output, cache read,
  *   cache write, cost) with a per-series legend value; series visibility and
  *   time range both recompute from the same `store.query` path (TC1).
@@ -25,7 +26,7 @@
 import type { UsageFilters, UsageQueryResult, TrendPoint } from "../domain";
 import { DEFAULT_BUCKET_MS } from "../domain";
 import type { UsageStore } from "../storage";
-import { displayWidth, formatCost, formatTokens, scopeLabel, timeRangeLabel, trendBar, truncateToWidth } from "./format";
+import { displayWidth, formatCost, formatTokens, padStartToWidth, padToWidth, scopeLabel, timeRangeLabel, trendBar, truncateToWidth } from "./format";
 
 /** Query scope: all sessions (global) or only the current working directory. */
 export type Scope = "global" | "project";
@@ -251,21 +252,22 @@ export class UsageDashboardComponent {
 
   /** Text view: metric rows (left column) + per-model table (right column). */
   private renderSplitView(lines: string[], result: UsageQueryResult, width: number): void {
-    const left: string[] = [];
-    this.renderMetrics(left, result, width);
     if (width < SPLIT_MIN_WIDTH) {
-      lines.push(...left);
+      this.renderMetrics(lines, result, width, width);
       lines.push(...this.modelLines(result, width, false));
       return;
     }
-    const leftW = Math.min(36, Math.floor(width / 2));
-    const rightW = width - leftW - 1;
+    const gutterW = 1;
+    const leftW = Math.floor((width - gutterW) / 2);
+    const rightW = width - gutterW - leftW;
+    const left: string[] = [];
+    this.renderMetrics(left, result, leftW, width);
     const right = this.modelLines(result, rightW, true);
     const rows = Math.max(left.length, right.length);
     for (let i = 0; i < rows; i++) {
-      const l = truncateToWidth(left[i] ?? "", leftW);
-      const r = truncateToWidth(right[i] ?? "", rightW);
-      lines.push(r === "" ? l : `${l} ${r}`);
+      const leftCell = padToWidth(truncateToWidth(left[i] ?? "", leftW), leftW);
+      const rightCell = padToWidth(truncateToWidth(right[i] ?? "", rightW), rightW);
+      lines.push(`${leftCell} ${rightCell}`);
     }
   }
 
@@ -274,32 +276,44 @@ export class UsageDashboardComponent {
     const models = result.byModel;
     const lines: string[] = [];
     if (models.length === 0) return lines;
-    const reqMax = Math.max(8, ...models.map((entry) => formatTokens(entry.requestCount).length));
-    const tokMax = Math.max(6, ...models.map((entry) => formatTokens(entry.totalTokens).length));
-    const nameMax = Math.max(6, Math.min(Math.max(...models.map((entry) => entry.model.length)), Math.max(10, width - reqMax - tokMax - 4)));
+    const reqMax = Math.max(8, ...models.map((entry) => displayWidth(formatTokens(entry.requestCount))));
+    const tokMax = Math.max(6, ...models.map((entry) => displayWidth(formatTokens(entry.totalTokens))));
+    const costMax = Math.max(4, ...models.map((entry) => displayWidth(formatCost(entry.cost))));
+    const reserved = reqMax + tokMax + costMax + 6;
+    const longestName = Math.max(6, ...models.map((entry) => displayWidth(entry.model)));
+    const nameMax = Math.max(6, Math.min(longestName, Math.max(6, width - reserved)));
     if (withHeader) {
-      const header = "model".padEnd(nameMax) + "requests".padStart(reqMax + 2) + "tokens".padStart(tokMax + 2);
+      const header =
+        padToWidth("models", nameMax) +
+        padStartToWidth("requests", reqMax + 2) +
+        padStartToWidth("tokens", tokMax + 2) +
+        padStartToWidth("cost", costMax + 2);
       lines.push(truncateToWidth(header, width));
     }
     for (const entry of models) {
       const name = truncateToWidth(entry.model, nameMax);
       const rowText =
-        name.padEnd(nameMax) +
-        formatTokens(entry.requestCount).padStart(reqMax + 2) +
-        formatTokens(entry.totalTokens).padStart(tokMax + 2);
+        padToWidth(name, nameMax) +
+        padStartToWidth(formatTokens(entry.requestCount), reqMax + 2) +
+        padStartToWidth(formatTokens(entry.totalTokens), tokMax + 2) +
+        padStartToWidth(formatCost(entry.cost), costMax + 2);
       lines.push(truncateToWidth(rowText, width));
     }
     return lines;
   }
 
-  private renderMetrics(lines: string[], result: UsageQueryResult, width: number): void {
+  /**
+   * Left-column metric rows. `budget` is the column width for layout;
+   * `terminalWidth` drives emoji vs symbol icons (wide terminal threshold).
+   */
+  private renderMetrics(lines: string[], result: UsageQueryResult, budget: number, terminalWidth: number): void {
     const totals = result.totals;
-    const labelWidth = Math.min(14, Math.max(0, Math.floor(width / 3)));
+    const labelWidth = Math.min(14, Math.max(0, Math.floor(budget / 3)));
     const row = (key: MetricKey, label: string, value: string, style: (s: string) => string = this.theme.normal): void => {
-      const padded = `${iconFor(key, width)} ${label.padEnd(labelWidth)}`;
+      const padded = `${iconFor(key, terminalWidth)} ${label.padEnd(labelWidth)}`;
       // Budget the value column from the padded prefix so color is applied
       // only to the already-truncated value (spec: color after truncation).
-      const valueCol = Math.max(0, width - displayWidth(padded));
+      const valueCol = Math.max(0, budget - displayWidth(padded));
       lines.push(`${padded}${style(truncateToWidth(value, valueCol))}`);
     };
     row("requests", "requests", formatTokens(totals.requestCount));
