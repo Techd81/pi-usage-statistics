@@ -1,11 +1,12 @@
 /**
- * TUI dashboard surface (design §6): a `ctx.ui.custom()` overlay component
+ * TUI dashboard surface (design §6): a `ctx.ui.custom()` embedded component
  * rendering the shared `UsageQueryResult` with terminal-safe formatting.
  *
- * - `/pi-usage-statistics` command opens this overlay; scope defaults to
- *   `global` and can be switched to `project` (records of the current cwd).
+ * - `/pi-usage-statistics` command opens this embedded dashboard; scope
+ *   defaults to `global` and can be switched to `project` (records of the
+ *   current cwd).
  * - Keys: `p`/`g` scope switch, `s` series-visibility cycle, `t` time-range
- *   cycle (今天 → 7天 → 30天 → 全部), `q`/`Esc` close.
+ *   cycle (今天 → 7天 → 30天 → 全部), `q` close, `Esc` back.
  * - Trend curves: one bar row per series (total, input, output, cache read,
  *   cache write, cost) with a per-series legend value; series visibility and
  *   time range both recompute from the same `store.query` path (TC1).
@@ -120,17 +121,17 @@ const seriesValues = (trend: readonly TrendPoint[], key: SeriesKey): number[] =>
 
 const KEY_QUIT = "q";
 const KEY_ESC = "\u001b";
-
+const KEY_ESC_NAME = "escape";
 /**
- * Interactive usage overlay. Key bindings:
- * `p`/`g` scope, `s` series visibility, `t` time range, `q`/`Esc` close.
+ * Embedded usage dashboard. Key bindings:
+ * `p`/`g` scope, `s` series visibility, `t` time range, `q` close, `Esc` back.
  */
 export class UsageDashboardComponent {
   private state: OverlayState = { kind: "loading" };
   private scope: Scope;
   private timeRange: TimeRange = "today";
   private seriesMode: SeriesMode = "all";
-
+  private completed = false;
   constructor(
     private readonly deps: OverlayDeps,
     private readonly theme: DashboardTheme = noopTheme,
@@ -190,7 +191,11 @@ export class UsageDashboardComponent {
         break;
       case KEY_QUIT:
       case KEY_ESC:
-        this.onDone();
+      case KEY_ESC_NAME:
+        if (!this.completed) {
+          this.completed = true;
+          this.onDone();
+        }
         break;
     }
   }
@@ -266,7 +271,7 @@ export class UsageDashboardComponent {
     const scope = scopeLabel(this.scope);
     const time = timeRangeLabel(this.timeRange);
     const series = this.seriesMode === "all" ? "全部" : this.seriesMode === "tokens" ? "Tokens" : "成本";
-    return `范围: ${scope} · 时间: ${time} · 系列: ${series} · [p]项目 [g]全局 [s]系列 [t]时间 [q]关闭`;
+    return `范围: ${scope} · 时间: ${time} · 系列: ${series} · [p]项目 [g]全局 [s]系列 [t]时间 [q]关闭 [ESC]back`;
   }
 }
 

@@ -3,7 +3,7 @@
  *
  * Arguments:
  * - (none)   -> default scope `global`; TUI mode opens the interactive
- *               overlay, other modes print a text summary;
+ *               embedded dashboard, other modes print a text summary;
  * - `project`-> scope `project` (records of the current working directory);
  * - `global` -> scope `global` (all locally stored sessions).
  *
@@ -126,8 +126,8 @@ export async function runUsageStatsCommand(
 }
 
 /**
- * TUI-only interactive overlay. Lazy-imports the dashboard module (pi-tui
- * must never load in non-TUI modes) and guards every TUI API by
+ * TUI-only interactive embedded dashboard. Lazy-imports the dashboard module
+ * (pi-tui must never load in non-TUI modes) and guards every TUI API by
  * `ctx.mode === "tui"`. Failures are reported non-fatally.
  */
 async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext, scope: Scope): Promise<void> {
@@ -136,7 +136,6 @@ async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommand
     const cwd = projectCwd(ctx);
     await ctx.ui.custom(
       makeOverlayFactory({ store: deps.store, projectCwd: cwd, initialScope: scope }),
-      { overlay: true },
     );
   } catch (error) {
     presentError(ctx, "tui", error);

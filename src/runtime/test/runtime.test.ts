@@ -388,7 +388,7 @@ describe("/pi-usage-statistics command", () => {
     }
   });
 
-  it("TC5: TUI mode opens the overlay via ctx.ui.custom; print mode never does", async () => {
+  it("TC5: TUI mode opens the embedded custom UI; print mode never does", async () => {
     const store = await makeStore();
     const { api, commands } = makeHarness();
     usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
@@ -398,11 +398,11 @@ describe("/pi-usage-statistics command", () => {
     await handler("", printCtx);
     expect(vi.mocked(printCtx.ui.custom)).not.toHaveBeenCalled();
 
-    // TUI mode: the overlay factory is handed to ctx.ui.custom; the fake
-    // custom() throws, which the command reports non-fatally.
+    // Embedded custom UI is the default; no floating overlay options are passed.
     const tuiCtx = makeCtx({ mode: "tui" });
     await handler("", tuiCtx);
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledWith(expect.any(Function));
   });
 
 });

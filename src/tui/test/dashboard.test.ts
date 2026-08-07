@@ -57,7 +57,7 @@ describe("UsageDashboardComponent.render", () => {
     // Status line shows the scope/time/series state.
     expect(text).toContain("范围: 全局");
     expect(text).toContain("时间: 今天");
-    expect(text).toContain("[p]项目 [g]全局 [s]系列 [t]时间 [q]关闭");
+    expect(text).toContain("[p]项目 [g]全局 [s]系列 [t]时间 [q]关闭 [ESC]back");
   });
 
   it("TC2: narrow width keeps only the headline series and never throws", async () => {
@@ -154,7 +154,7 @@ describe("UsageDashboardComponent.handleInput", () => {
     expect(component.currentTimeRange).toBe("today");
   });
 
-  it("q and Escape close the overlay; other keys are ignored", async () => {
+  it("q closes and Escape goes back once; other keys are ignored", async () => {
     const deps = await makeDeps();
     const onDone = vi.fn();
     const component = new UsageDashboardComponent(deps, undefined, onDone);
@@ -162,8 +162,10 @@ describe("UsageDashboardComponent.handleInput", () => {
     expect(onDone).not.toHaveBeenCalled();
     component.handleInput("q");
     expect(onDone).toHaveBeenCalledTimes(1);
+    component.handleInput("q");
+    component.handleInput("escape");
     component.handleInput("\u001b");
-    expect(onDone).toHaveBeenCalledTimes(2);
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });
 
