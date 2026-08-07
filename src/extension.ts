@@ -5,7 +5,7 @@
  *
  * Lifecycle:
  * - `session_start`   -> idempotent store init + debounced single-flight
- *                        background scan;
+ *                        background scan (silent on success);
  * - `message_end`     -> collector (see src/runtime/collector.ts);
  * - `model_select`    -> no-op (query dimensions are derived per query);
  * - `session_shutdown`-> stop timers, flush pending writes.
@@ -17,10 +17,9 @@
  * (spec/typescript/error-handling.md).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { UsageStore, type ScanSummary } from "./storage";
+import { UsageStore } from "./storage";
 import { collectMessageEnd } from "./runtime/collector";
-import { presentText, runUsageStatsCommand } from "./runtime/commands";
-import { formatScanSummary } from "./runtime/format";
+import { runUsageStatsCommand } from "./runtime/commands";
 import { DebouncedScanScheduler } from "./runtime/scan-scheduler";
 
 export const DEFAULT_SCAN_DEBOUNCE_MS = 1000;
@@ -49,8 +48,9 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
 
   const scheduler = new DebouncedScanScheduler(async () => {
     try {
-      const summary: ScanSummary = await store.refresh();
-      if (lastCtx) presentText(lastCtx, formatScanSummary(summary));
+      // Background scan stays silent on success — only failures notify.
+      // Explicit `/pi-usage-statistics refresh` still prints a summary.
+      await store.refresh();
     } catch (error) {
       notifyError(lastCtx, "background scan", error);
     }

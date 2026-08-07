@@ -3,9 +3,8 @@
  *
  * - `schedule()` coalesces bursts of events into one pass after `delayMs`;
  * - only one scan runs at a time; requests arriving while a pass is running
- *   are dropped. This is safe because `UsageStore.refresh()` is itself
- *   single-flight and dirty-flagged: events during a scan trigger exactly one
- *   follow-up pass on the next explicit refresh;
+ *   arm a pending follow-up so the next pass still runs after the in-flight
+ *   one completes (session_start during a long scan must not be dropped);
  * - the timer is unref'd so it never keeps the process alive;
  * - `run` must handle its own errors; the scheduler never rethrows into Pi.
  */
@@ -14,6 +13,8 @@ export type ScanRunner = () => Promise<void>;
 export class DebouncedScanScheduler {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inflight: Promise<void> | null = null;
+  /** Set when schedule/run was requested while a pass was already in flight. */
+  private pendingFollowUp = false;
   private readonly delayMs: number;
 
   constructor(
@@ -34,7 +35,10 @@ export class DebouncedScanScheduler {
   }
 
   private runSafely(): void {
-    if (this.inflight) return; // single-flight: one pass at a time
+    if (this.inflight) {
+      this.pendingFollowUp = true;
+      return;
+    }
     this.inflight = (async () => {
       try {
         await this.run();
@@ -42,6 +46,10 @@ export class DebouncedScanScheduler {
         // The runner reports its own failures; never propagate into Pi.
       } finally {
         this.inflight = null;
+        if (this.pendingFollowUp) {
+          this.pendingFollowUp = false;
+          this.schedule();
+        }
       }
     })();
   }
@@ -49,6 +57,7 @@ export class DebouncedScanScheduler {
   /** Cancel the pending timer and wait for an in-flight pass (shutdown path). */
   async settle(): Promise<void> {
     this.stop();
+    this.pendingFollowUp = false;
     while (this.inflight) await this.inflight;
   }
 
@@ -61,6 +70,6 @@ export class DebouncedScanScheduler {
   }
 
   get hasPendingWork(): boolean {
-    return this.timer !== null || this.inflight !== null;
+    return this.timer !== null || this.inflight !== null || this.pendingFollowUp;
   }
 }
