@@ -350,6 +350,32 @@ describe("UsageStore", () => {
     expect(result.totals.inputTokens).toBe(42);
   });
 
+  it("stop waits for an in-flight live persistence pass and completes the final flush", async () => {
+    const { store, storeDir } = await makeStore();
+    const recordStore = (store as unknown as { store: { flush: () => Promise<void> } }).store;
+    let releaseFlush!: () => void;
+    const heldFlush = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const flushSpy = vi.spyOn(recordStore, "flush").mockImplementationOnce(() => heldFlush);
+
+    store.upsertRecord(makeRecord({ sessionId: "live", sourceEntryId: "pending", inputTokens: 17 }));
+    const persistence = store.persistLiveRecord();
+    await vi.waitFor(() => expect(flushSpy).toHaveBeenCalledTimes(1));
+    let stopped = false;
+    const stopping = store.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseFlush();
+    await Promise.all([persistence, stopping]);
+    const loaded = new UsageStore({ storeDir, sessionDir });
+    await loaded.init();
+    expect(loaded.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.inputTokens).toBe(17);
+  });
+
   it("loads pricing.json override and applies it on scan (DC4)", async () => {
     const s1Path = join(sessionDir, "s1.jsonl");
     sessionFiles.set(s1Path, [
@@ -456,7 +482,7 @@ describe("UsageStore.reloadFromDisk (多窗口热更新)", () => {
     const a = new UsageStore({ storeDir, sessionDir });
     await a.init();
     a.upsertRecord(makeRecord({ sessionId: "a", sourceEntryId: "e1", timestampMs: Date.now(), inputTokens: 7 }));
-    await expect(a.reloadFromDisk()).resolves.toBeUndefined();
+    await expect(a.reloadFromDisk()).resolves.toBe(true);
     // In-memory records survive even though the file was never flushed before a failure path
     expect(a.query({ fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false }).totals.totalTokens).toBeGreaterThanOrEqual(0);
   });

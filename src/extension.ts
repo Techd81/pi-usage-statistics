@@ -110,7 +110,20 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
     }
     // Hot update: only messages that actually stored a record trigger a
     // (debounced) dashboard refresh — non-countable messages stay silent.
-    if (collected) notifyLiveListeners();
+    if (collected) {
+      notifyLiveListeners();
+      // Do not await disk I/O in message_end. UsageStore keeps the dirty state
+      // on failure; shutdown and later live events provide retry opportunities.
+      try {
+        void store.persistLiveRecord().catch((error) => {
+          notifyError(ctx, "persist live usage", error);
+        });
+      } catch (error) {
+        // Keep even a synchronous scheduling failure inside the extension
+        // boundary; custom/test stores must not be able to break Pi.
+        notifyError(ctx, "persist live usage", error);
+      }
+    }
   });
 
   pi.on("model_select", (_event, _ctx) => {

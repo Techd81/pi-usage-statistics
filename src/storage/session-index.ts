@@ -157,6 +157,13 @@ export class UsageStore {
   private scannedOnce = false;
   /** Active price table (builtin merged with optional local override). */
   private priceTable: PricingTable = BUILTIN_PRICE_TABLE;
+  /** Serialize scans, reloads, and persistence without overlapping disk work. */
+  private operationTail: Promise<unknown> = Promise.resolve();
+  /** Coalesced live persistence state. */
+  private persistPending = false;
+  private persistPromise: Promise<void> | null = null;
+  private acceptingRuntimeWork = true;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(deps: StoreDependencies = {}) {
     const agentDir = getAgentDir();
@@ -169,8 +176,12 @@ export class UsageStore {
 
   /** Initialize: load the durable index + optional pricing.json (non-fatal). */
   async init(): Promise<void> {
-    await this.store.load();
-    await this.loadPricingOverride();
+    this.acceptingRuntimeWork = true;
+    this.stopPromise = null;
+    await this.enqueueOperation(async () => {
+      await this.store.load();
+      await this.loadPricingOverride();
+    });
   }
 
   /**
@@ -209,9 +220,9 @@ export class UsageStore {
   }
 
   /**
-   * Live event path (message_end): apply cost policy, upsert immediately so
-   * the current session reflects the record, then mark dirty so the next
-   * scan reconciles rather than double-counting (SC2).
+   * Live event path (message_end): apply cost policy and update memory first.
+   * The caller separately schedules `persistLiveRecord()` so this method stays
+   * synchronous and never waits for disk I/O (R1).
    */
   upsertRecord(record: UsageRecord): UsageRecord {
     const priced = applyCostPolicy(record, this.priceTable);
@@ -219,6 +230,47 @@ export class UsageStore {
     this.liveRecords.set(priced.recordId, priced);
     if (this.inflight) this.dirtyDuringScan = true;
     return priced;
+  }
+
+  /**
+   * Schedule a single-flight, coalesced live flush. The returned promise is
+   * useful to tests and shutdown; message_end intentionally does not await it.
+   * A failed pass keeps the store dirty so a later event or stop() can retry.
+   */
+  persistLiveRecord(): Promise<void> {
+    if (!this.acceptingRuntimeWork) return Promise.resolve();
+    this.persistPending = true;
+    if (!this.persistPromise) {
+      this.persistPromise = Promise.resolve()
+        .then(async () => {
+          while (this.persistPending) {
+            this.persistPending = false;
+            try {
+              await this.enqueueOperation(async () => {
+                // Keep the live overlay authoritative even if an overlapping
+                // load replaced the RecordStore's private snapshot before
+                // this queued persistence pass started.
+                const live = [...this.liveRecords.values()];
+                if (live.length > 0) this.store.merge(live);
+                if (this.store.isDirty) await this.store.flush();
+              });
+            } catch (error) {
+              this.persistPending = true;
+              throw error;
+            }
+          }
+        })
+        .finally(() => {
+          this.persistPromise = null;
+        });
+    }
+    return this.persistPromise;
+  }
+
+  private enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationTail.then(operation, operation);
+    this.operationTail = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   /** One coalesced scan pass with optional per-call progress (design contract). */
@@ -236,7 +288,7 @@ export class UsageStore {
   /** Single-flight start: concurrent requests share the in-flight promise. */
   private startScan(rebuilt: boolean, progress?: (done: number, total: number) => void): Promise<ScanSummary> {
     if (this.inflight) return this.inflight;
-    const scan = this.runScan(rebuilt, progress).finally(() => {
+    const scan = this.enqueueOperation(() => this.runScan(rebuilt, progress)).finally(() => {
       if (this.inflight === scan) this.inflight = null;
     });
     this.inflight = scan;
@@ -267,10 +319,26 @@ export class UsageStore {
 
   /** Flush pending writes and release resources. */
   async stop(): Promise<void> {
-    // Drain queued rebuild chains too: the in-flight scan can hand off to a
-    // follow-up rebuild before resolving.
-    while (this.inflight) await this.inflight;
-    await this.store.flush();
+    if (this.stopPromise) return this.stopPromise;
+    this.acceptingRuntimeWork = false;
+    this.stopPromise = (async () => {
+      // Drain queued rebuild chains too: the in-flight scan can hand off to a
+      // follow-up rebuild before resolving. A failed scan must not skip the
+      // final persistence pass required by normal shutdown.
+      while (this.inflight || this.queuedRebuild) {
+        const pendingScan = this.queuedRebuild ?? this.inflight;
+        if (!pendingScan) break;
+        await pendingScan.catch(() => undefined);
+      }
+      // A live pass may be queued behind the scan. Its failure is retried by
+      // the final flush below; shutdown must not abandon dirty data.
+      await this.persistPromise?.catch(() => undefined);
+      await this.enqueueOperation(async () => {
+        if (this.store.isDirty) await this.store.flush();
+        this.persistPending = false;
+      });
+    })();
+    return this.stopPromise;
   }
 
   /**
@@ -280,17 +348,32 @@ export class UsageStore {
    * (its records are now part of the durable file). Failures are non-fatal:
    * on error the in-memory state is kept as-is.
    */
-  async reloadFromDisk(): Promise<void> {
+  async reloadFromDisk(): Promise<boolean> {
     try {
-      // Flush only when this process has pending writes (dirty). Skipping a
-      // clean flush avoids rewriting the file, which would otherwise look
-      // like an external change to the poller and self-trigger reloads.
-      if (this.store.isDirty) await this.store.flush();
-      await this.store.load();
-      this.liveRecords.clear();
-      this.scannedOnce = true;
+      // Persistence is already serialized with this operation. If a live
+      // record arrives while load() is awaiting I/O, overlay it afterwards and
+      // merge it under the same lock before clearing the live set.
+      await this.persistPromise?.catch(() => undefined);
+      await this.enqueueOperation(async () => {
+        if (this.store.isDirty) await this.store.flush();
+        await this.store.load();
+        const live = [...this.liveRecords.values()];
+        if (live.length > 0) {
+          this.store.merge(live);
+          await this.store.flush();
+        }
+        // A message_end may arrive while the final flush is awaiting I/O.
+        // Clear only the exact overlay values included in this durable pass.
+        for (const record of live) {
+          if (this.liveRecords.get(record.recordId) === record) this.liveRecords.delete(record.recordId);
+        }
+        this.scannedOnce = true;
+      });
+      return true;
     } catch {
-      // Non-fatal: keep whatever in-memory state we have.
+      // Non-fatal: keep whatever in-memory state we have and let the poller
+      // retry the same baseline on its next tick.
+      return false;
     }
   }
 
@@ -351,13 +434,14 @@ export class UsageStore {
         }
       }
 
+      const live = [...this.liveRecords.values()];
       if (rebuilt) {
         // Full rebuild: scanned sessions are authoritative for everything we
         // could see; live records from the running session merge on top so an
         // event recorded mid-scan is not lost.
         const merged = new Map<string, UsageRecord>();
         for (const record of scanned) merged.set(record.recordId, record);
-        for (const record of this.liveRecords.values()) merged.set(record.recordId, record);
+        for (const record of live) merged.set(record.recordId, record);
         const rebuiltRecords = [...merged.values()];
         summary.recordsMerged = rebuiltRecords.length;
         this.store.replaceAll(rebuiltRecords);
@@ -366,17 +450,20 @@ export class UsageStore {
         // recordId), then overlay live records so the running session is
         // always current.
         this.store.merge(scanned);
-        this.store.merge([...this.liveRecords.values()]);
-        summary.recordsMerged = scanned.length + this.liveRecords.size;
+        this.store.merge(live);
+        summary.recordsMerged = scanned.length + live.length;
       }
-      // Drop live overlays that the scan already reconciled — keeps long
-      // sessions from re-merging an ever-growing live set on every refresh.
+      // Drop only the exact live overlay values reconciled by this pass. A
+      // newer message_end with the same recordId may arrive while the scan or
+      // its flush is awaiting I/O and must remain available for the follow-up.
       const scannedIds = new Set(scanned.map((r) => r.recordId));
-      for (const id of this.liveRecords.keys()) {
-        if (scannedIds.has(id)) this.liveRecords.delete(id);
+      for (const record of live) {
+        if (scannedIds.has(record.recordId) && this.liveRecords.get(record.recordId) === record) {
+          this.liveRecords.delete(record.recordId);
+        }
       }
       this.scannedOnce = true;
-      await this.store.flush();
+      await this.store.flush({ replaceDisk: rebuilt });
     } finally {
       summary.finishedAtMs = Date.now();
     }

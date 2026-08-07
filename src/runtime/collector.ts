@@ -20,7 +20,9 @@
  * Reconciliation rule (documented): live records and scanned records share
  * the domain identity rule (responseId / timestamp+content fingerprint) and
  * the store upserts by recordId, so re-delivery and re-scanning never change
- * totals for the same message. Cost policy is applied inside `UsageStore.upsertRecord`.
+ * totals for the same message. Cost policy is applied inside
+ * `UsageStore.upsertRecord`; the runtime schedules persistence separately so
+ * the message handler never waits for disk I/O.
  */
 import type { ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 import type { UsageRecord } from "../domain";

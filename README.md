@@ -46,7 +46,7 @@
   | `Esc` | 返回（模型表 → 主视图）或关闭 |
 
 - **Multi-series trends** — 同屏叠加 Cost / Cache write / Cache read / Input / Output 五条序列
-- **Live updates / 实时刷新** — 仪表盘打开期间双通道自动更新：本会话 `message_end` 即时刷新（约 300ms 防抖）；**多窗口场景**每 2s 检测 `records.jsonl` 变化，其他 pi 窗口产生的数据自动重载上屏，无需重启
+- **Live updates / 实时刷新** — 仪表盘打开期间双通道自动更新：成功的 `message_end` 先立即更新当前窗口内存，并异步持久化到共享 `records.jsonl`（连续消息会合并写入），本会话约 300ms 防抖刷新；**多窗口场景**每 2s 检测共享文件变化，其他仍在运行的 Pi 窗口产生的数据自动重载上屏，无需退出、重启或重新执行命令
 - **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算（标记 `~` / estimated）；无价格时显示 `--`
 
 ## Requirements / 环境要求
@@ -111,7 +111,7 @@ pi install npm:pi-token-usage-statistics
 1. 打开后默认看到 **总览 + 趋势图**（如 `images/image1.png`）
 2. 按 `m` 进入 **按模型统计表**（如 `images/image2.png`）：Model / Requests / Tokens / Total cost / Avg cost
 3. 按 `t` 切换时间窗；按 `p` / `g` 切换项目 / 全局
-4. **实时刷新**：会话继续产生新回复时，界面自动更新（约 300ms 防抖），无需按键
+4. **实时刷新**：会话继续产生新回复时，记录会在 Pi 仍运行期间异步写入共享索引，界面自动更新（约 300ms 防抖）；其他 Pi 窗口的新增记录由约 2s 轮询后自动显示，无需按键
 5. 按 `Esc` 退出（在模型表时先回到主视图）
 
 ## Data & Privacy / 数据与隐私
@@ -119,7 +119,7 @@ pi install npm:pi-token-usage-statistics
 - 数据仅存本地：`<agent-dir>/token-usage-statistics/`（`records.jsonl` + `index.json`）
 - 权威数据源是 Pi 自己的 session 文件（JSONL）；本扩展的索引只是可重建的加速缓存
 - **无网络请求**：无服务器、无 CDN、无遥测
-- 后台扫描在 session 启动时 debounce + single-flight 执行；成功时静默，失败才通知，不打扰正常对话
+- 后台扫描在 session 启动时 debounce + single-flight 执行；成功的 `message_end` 记录会在活动会话期间异步落盘，跨窗口轮询据此同步；写盘/扫描失败时保留可用内存并在后续机会重试，成功时静默，失败才通知，不打扰正常对话
 
 ## Cost Estimation & Price Overrides / 成本估算与价格覆盖
 

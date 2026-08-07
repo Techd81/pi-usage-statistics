@@ -200,6 +200,11 @@ describe("message_end collector", () => {
 
     const event = assistantMessageEndEvent("msg-1", { input: 100, output: 50, cacheRead: 20, cacheWrite: 10 });
     await fire(handlers, event, ctx);
+    // message_end returns before persistence; the explicit drain observes the
+    // asynchronous write without requiring session_shutdown.
+    await store.persistLiveRecord();
+    const persisted = await readFile(join(storeDir, "records.jsonl"), "utf8");
+    expect(persisted).toContain("msg-1");
 
     let result = store.query(defaultFilters());
     expect(result.totals.requestCount).toBe(1);
@@ -224,6 +229,40 @@ describe("message_end collector", () => {
     result = store.query(defaultFilters());
     expect(result.totals.requestCount).toBe(1);
     expect(result.totals.inputTokens).toBe(100);
+  });
+
+  it("RC1f: duplicate live persistence remains one request", async () => {
+    const store = await makeStore();
+    await store.init();
+    const record = makeRecord({ sessionId: "producer", sourceEntryId: "same", inputTokens: 13 });
+    store.upsertRecord(record);
+    const first = store.persistLiveRecord();
+    store.upsertRecord(record);
+    const second = store.persistLiveRecord();
+    await Promise.all([first, second]);
+    const loaded = new UsageStore({ storeDir, sessionDir });
+    await loaded.init();
+    expect(loaded.query(defaultFilters()).totals.requestCount).toBe(1);
+    expect(loaded.query(defaultFilters()).totals.inputTokens).toBe(13);
+  });
+
+  it("RC1g: persistence failure is non-fatal and a later event can recover", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    const ctx = makeCtx();
+    const persistSpy = vi.spyOn(store, "persistLiveRecord").mockRejectedValueOnce(new Error("write boom"));
+
+    await expect(fire(handlers, assistantMessageEndEvent("failed-write", { input: 4, output: 1, cacheRead: 0, cacheWrite: 0 }), ctx)).resolves.toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    persistSpy.mockRestore();
+    await fire(handlers, assistantMessageEndEvent("recovered-write", { input: 6, output: 2, cacheRead: 0, cacheWrite: 0 }), ctx);
+    await store.persistLiveRecord();
+
+    const loaded = new UsageStore({ storeDir, sessionDir });
+    await loaded.init();
+    expect(loaded.query(defaultFilters()).totals.requestCount).toBe(2);
+    expect(vi.mocked(ctx.ui.notify)).toHaveBeenCalledWith(expect.stringContaining("persist live usage failed"), "error");
   });
 
   it("RC1b: assistant messages without usage still count as requests (zero tokens)", async () => {
@@ -489,13 +528,14 @@ describe("/pi-usage-statistics command", () => {
     expect(component).toBeDefined();
     for (let i = 0; i < 6; i++) component!.handleInput("t");
 
-    // Another process (separate UsageStore over the same directory) writes + flushes.
+    // Another still-running process writes asynchronously; no stop/shutdown is
+    // required for the consumer dashboard to observe the durable record.
     const other = new UsageStore({ storeDir, sessionDir });
     await other.init();
     other.upsertRecord(
       makeRecord({ sessionId: "other-proc", sourceEntryId: "e1", timestampMs: 1_700_000_000_000, inputTokens: 222 }),
     );
-    await other.stop(); // flushes to the shared records.jsonl
+    await other.persistLiveRecord();
 
     // Before polling catches it, the dashboard does not show the external record.
     expect(component!.render(80).join("\n")).not.toContain("222");
@@ -517,14 +557,22 @@ describe("lifecycle and error pathway", () => {
     usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
     const ctx = makeCtx();
     await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+    let releasePersist!: () => void;
+    const pendingPersist = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const persistSpy = vi.spyOn(store, "persistLiveRecord").mockReturnValueOnce(pendingPersist);
     await fire(handlers, assistantMessageEndEvent("msg-4", { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 }), ctx);
 
-    // The record is in memory; nothing is on disk until a flush.
+    // The handler completed while the injected persistence promise is still
+    // pending, proving message_end does not await disk I/O.
+    expect(persistSpy).toHaveBeenCalledTimes(1);
     const before = await readFile(join(storeDir, "records.jsonl"), "utf8").catch(() => "");
     expect(before).not.toContain("msg-4");
 
-    await fire(handlers, { type: "session_shutdown", reason: "quit" }, ctx);
-
+    const shutdown = fire(handlers, { type: "session_shutdown", reason: "quit" }, ctx);
+    releasePersist();
+    await shutdown;
     const after = await readFile(join(storeDir, "records.jsonl"), "utf8");
     expect(after).toContain("msg-4");
   });

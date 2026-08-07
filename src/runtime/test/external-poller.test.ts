@@ -38,7 +38,7 @@ describe("ExternalDataPoller", () => {
     const { reader, state } = makeFakeReader();
     const onReloaded = vi.fn();
     const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
-    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(undefined);
+    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(true);
 
     vi.useFakeTimers();
     await poller.ensureRunning();
@@ -63,7 +63,7 @@ describe("ExternalDataPoller", () => {
     const { reader, state } = makeFakeReader();
     const onReloaded = vi.fn();
     const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
-    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(undefined);
+    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(true);
 
     vi.useFakeTimers();
     await poller.ensureRunning();
@@ -86,7 +86,7 @@ describe("ExternalDataPoller", () => {
     const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
     // reloadFromDisk swallows errors internally, so simulate a reader that
     // throws mid-flight instead (poller must not throw into the interval).
-    vi.spyOn(store, "reloadFromDisk").mockRejectedValueOnce(new Error("disk boom")).mockResolvedValue(undefined);
+    vi.spyOn(store, "reloadFromDisk").mockRejectedValueOnce(new Error("disk boom")).mockResolvedValue(true);
 
     vi.useFakeTimers();
     await poller.ensureRunning();
@@ -99,12 +99,37 @@ describe("ExternalDataPoller", () => {
     expect(onReloaded).toHaveBeenCalledTimes(1);
   });
 
+  it("coalesces overlapping polls and stop suppresses an in-flight notification", async () => {
+    const { store } = await makeEnv();
+    const { reader, state } = makeFakeReader();
+    const onReloaded = vi.fn();
+    const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
+    let releaseReload!: () => void;
+    const reload = new Promise<boolean>((resolve) => {
+      releaseReload = () => resolve(true);
+    });
+    const reloadSpy = vi.spyOn(store, "reloadFromDisk").mockReturnValue(reload);
+
+    vi.useFakeTimers();
+    await poller.ensureRunning();
+    state.mtimeMs = 4500;
+    const first = poller.pollNow();
+    await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+    const second = poller.pollNow();
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+    poller.stop();
+    releaseReload();
+    await Promise.all([first, second]);
+    expect(onReloaded).not.toHaveBeenCalled();
+    expect(poller.isRunning).toBe(false);
+  });
+
   it("stop() cancels the interval and resets the baseline", async () => {
     const { store } = await makeEnv();
     const { reader, state } = makeFakeReader();
     const onReloaded = vi.fn();
     const poller = new ExternalDataPoller(store, onReloaded, { readFileState: reader });
-    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(undefined);
+    vi.spyOn(store, "reloadFromDisk").mockResolvedValue(true);
 
     vi.useFakeTimers();
     await poller.ensureRunning();

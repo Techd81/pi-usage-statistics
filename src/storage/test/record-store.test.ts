@@ -2,7 +2,7 @@
  * RecordStore unit tests: atomic persistence, truncated-tail tolerance,
  * schema-versioned rebuild, compaction, and recordId upsert semantics.
  */
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -147,6 +147,54 @@ describe("RecordStore", () => {
     const lines = text.trim().split("\n");
     expect(lines).toHaveLength(10); // compaction dedupes, count stays same for unique ids
     expect(JSON.parse(lines[0]!).recordId).toBe("session-1:e0");
+  });
+
+  it("merges distinct concurrent writers without losing either record", async () => {
+    const dir = await makeStoreDir();
+    const a = new RecordStore({ storeDir: dir });
+    const b = new RecordStore({ storeDir: dir });
+    await Promise.all([a.load(), b.load()]);
+    a.upsertRecord(makeRecord({ sessionId: "a", sourceEntryId: "e1", inputTokens: 11 }));
+    b.upsertRecord(makeRecord({ sessionId: "b", sourceEntryId: "e1", inputTokens: 22 }));
+    await Promise.all([a.flush(), b.flush()]);
+
+    const loaded = new RecordStore({ storeDir: dir });
+    await loaded.load();
+    expect(loaded.snapshot().records.map((record) => record.recordId).sort()).toEqual(["a:e1", "b:e1"]);
+  });
+
+  it("a replace-disk rebuild keeps records added by another process after load", async () => {
+    const dir = await makeStoreDir();
+    const seed = new RecordStore({ storeDir: dir });
+    await seed.load();
+    seed.upsertRecord(makeRecord({ sessionId: "stale", sourceEntryId: "old", inputTokens: 1 }));
+    await seed.flush();
+
+    const rebuilding = new RecordStore({ storeDir: dir });
+    const writer = new RecordStore({ storeDir: dir });
+    await Promise.all([rebuilding.load(), writer.load()]);
+    rebuilding.replaceAll([makeRecord({ sessionId: "scan", sourceEntryId: "fresh", inputTokens: 2 })]);
+    writer.upsertRecord(makeRecord({ sessionId: "other", sourceEntryId: "live", inputTokens: 3 }));
+    await writer.flush();
+    await rebuilding.flush({ replaceDisk: true });
+
+    const loaded = new RecordStore({ storeDir: dir });
+    await loaded.load();
+    expect(loaded.snapshot().records.map((record) => record.recordId).sort()).toEqual(["other:live", "scan:fresh"]);
+  });
+
+  it("keeps a failed flush dirty so a later flush can recover", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sourceEntryId: "retry", inputTokens: 9 }));
+    const lockPath = `${store.recordsFilePath}.lock`;
+    await mkdir(lockPath); // exclusive open fails until the synthetic contention clears
+    await expect(store.flush()).rejects.toThrow("Timed out acquiring records lock");
+    expect(store.isDirty).toBe(true);
+    await rm(lockPath, { recursive: true });
+    await expect(store.flush()).resolves.toBeUndefined();
+    expect(store.isDirty).toBe(false);
   });
 
   it("reset removes persisted state (SC3 rebuild path)", async () => {

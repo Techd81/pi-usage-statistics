@@ -46,6 +46,9 @@ export class ExternalDataPoller {
   private readonly readFileState: FileStateReader;
   /** Listener invoked after a successful reload (wired to liveListeners). */
   private readonly onReloaded: () => void;
+  private pollInFlight: Promise<void> | null = null;
+  private pollQueued = false;
+  private generation = 0;
 
   constructor(
     store: UsageStore,
@@ -61,7 +64,16 @@ export class ExternalDataPoller {
   /** Start polling (idempotent); the first read becomes the change baseline. */
   async ensureRunning(): Promise<void> {
     if (this.timer !== null) return;
-    this.baseline = await this.readFileState(this.store.recordsFilePath);
+    const generation = this.generation;
+    let baseline: FileState | null = null;
+    try {
+      baseline = await this.readFileState(this.store.recordsFilePath);
+    } catch {
+      // A transient stat failure must not prevent the interval from starting;
+      // a null baseline makes the next successful tick retry detection.
+    }
+    if (generation !== this.generation || this.timer !== null) return;
+    this.baseline = baseline;
     this.timer = setInterval(() => {
       void this.pollNow();
     }, this.intervalMs);
@@ -70,11 +82,13 @@ export class ExternalDataPoller {
 
   /** Stop polling and drop the baseline (next ensureRunning re-primes). */
   stop(): void {
+    this.generation += 1;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.baseline = null;
+    this.pollQueued = false;
   }
 
   get isRunning(): boolean {
@@ -83,25 +97,49 @@ export class ExternalDataPoller {
 
   /** Run one change-detection pass (also drives the interval). */
   async pollNow(): Promise<void> {
-    const state = await this.readFileState(this.store.recordsFilePath);
-    if (state === null) return; // file gone mid-flight: wait for the next tick
-    const changed =
-      this.baseline === null ||
-      state.mtimeMs !== this.baseline.mtimeMs ||
-      state.size !== this.baseline.size;
-    if (!changed) return;
-    try {
-      await this.store.reloadFromDisk();
-    } catch {
-      // Reload failed: keep the OLD baseline so the next tick retries the
-      // same change instead of silently dropping it.
-      return;
+    if (this.pollInFlight) {
+      this.pollQueued = true;
+      return this.pollInFlight;
     }
-    // Re-baseline AFTER the reload: reloadFromDisk may flush this process's
-    // own pending records, which rewrites the file (new mtime). Without this
-    // the next tick would see our own write as an external change and loop
-    // every interval. With it, only genuine external writes re-trigger.
-    this.baseline = (await this.readFileState(this.store.recordsFilePath)) ?? state;
-    this.onReloaded();
+    const generation = this.generation;
+    const run = (async () => {
+      const state = await this.readFileState(this.store.recordsFilePath);
+      if (generation !== this.generation) return;
+      if (state === null) return; // file gone mid-flight: wait for the next tick
+      const changed =
+        this.baseline === null ||
+        state.mtimeMs !== this.baseline.mtimeMs ||
+        state.size !== this.baseline.size;
+      if (!changed) return;
+      try {
+        if (!(await this.store.reloadFromDisk())) return;
+      } catch {
+        // Reload failed: keep the OLD baseline so the next tick retries the
+        // same change instead of silently dropping it.
+        return;
+      }
+      // Re-baseline AFTER the reload: reloadFromDisk may flush this process's
+      // own pending records, which rewrites the file (new mtime). Without this
+      // the next tick would see our own write as an external change and loop.
+      if (generation !== this.generation || this.timer === null) return;
+      const reloadedState = await this.readFileState(this.store.recordsFilePath).catch(() => null);
+      if (generation !== this.generation || this.timer === null) return;
+      this.baseline = reloadedState ?? state;
+      try {
+        this.onReloaded();
+      } catch {
+        // Notification is best-effort and must not break polling.
+      }
+    })().catch(() => undefined).finally(() => {
+      if (this.pollInFlight === run) this.pollInFlight = null;
+      if (this.pollQueued && generation === this.generation && this.timer !== null) {
+        this.pollQueued = false;
+        void this.pollNow();
+      } else {
+        this.pollQueued = false;
+      }
+    });
+    this.pollInFlight = run;
+    return run;
   }
 }
