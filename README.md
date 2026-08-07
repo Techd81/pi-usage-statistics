@@ -46,7 +46,7 @@
   | `Esc` | 返回（模型表 → 主视图）或关闭 |
 
 - **Multi-series trends** — 同屏叠加 Cost / Cache write / Cache read / Input / Output 五条序列
-- **Live updates / 实时刷新** — 仪表盘打开期间自动订阅 `message_end`，新回复产生后防抖刷新（约 300ms），数字与趋势实时跟上会话
+- **Live updates / 实时刷新** — 仪表盘打开期间双通道自动更新：本会话 `message_end` 即时刷新（约 300ms 防抖）；**多窗口场景**每 2s 检测 `records.jsonl` 变化，其他 pi 窗口产生的数据自动重载上屏，无需重启
 - **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算（标记 `~` / estimated）；无价格时显示 `--`
 
 ## Requirements / 环境要求
