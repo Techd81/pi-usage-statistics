@@ -114,6 +114,35 @@ pi install npm:pi-token-usage-statistics
 4. **实时刷新（秒级）**：会话继续产生新回复时，记录会在 Pi 仍运行期间异步写入共享索引，界面自动更新（约 300ms 防抖）；其他 Pi 窗口的新增记录由约 0.5s 轮询自动检测并重载上屏（正常路径约 1 秒内显示），无需按键、无需退出重启
 5. 按 `Esc` 退出（在模型表时先回到主视图）
 
+## Terminal Quick Access / 终端快速入口
+
+不想先进入 pi 会话？两种方式直接从终端打开统计 dashboard（默认 global scope，仪表盘内按 `p` / `g` 可切换项目 / 全局）。
+
+### `pi --usage`（安装扩展后立即可用）
+
+```bash
+pi --usage
+```
+
+等价于启动 pi 会话后立即执行 `/pi-usage-statistics`（无参数，global scope）。按 `Esc` 关闭 dashboard 后停留在 pi 会话内，可继续正常对话——与在会话内执行命令的体验完全一致。非交互模式同样支持：`pi -p --usage` 输出文本摘要而不打开 TUI；`json` / `rpc` 模式遵循既有约定（静默 / notify），绝不污染输出流。
+
+> 注意：pi 的 flag 解析会把 `--usage` 后紧跟的普通参数吞作 flag 值（boolean flag 仍解析为 `true`），所以请勿在 `--usage` 后附带消息词，如 `pi --usage hello` 中 `hello` 不会作为消息发送。
+
+### `pi usage`（PowerShell wrapper，可选）
+
+pi CLI 将位置参数一律当作消息处理，因此字面 `pi usage` 需要由 shell 层转发。运行一键安装脚本（幂等，可重复执行；会写入 / 更新 `$PROFILE`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-pi-usage.ps1
+```
+
+脚本安装的 `pi` wrapper 函数：
+
+- `pi usage [args...]` → 转发为 `pi --usage [args...]`（等价于上方 `pi --usage`）
+- `pi` 的其他用法（`pi -c`、`pi --help`、`pi install ...` 等）原样透传，行为不变
+
+wrapper 在新开的 PowerShell 会话中生效（或先执行 `. $PROFILE`）。**前提**：本扩展已安装并重启 Pi——`--usage` flag 由扩展注册，未安装时 pi CLI 会报 `Unknown option`。
+
 ## Data & Privacy / 数据与隐私
 
 - 数据仅存本地：`<agent-dir>/token-usage-statistics/`（`records.jsonl` + `index.json`）

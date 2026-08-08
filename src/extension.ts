@@ -11,12 +11,15 @@
  * - `session_shutdown`-> stop timers, flush pending writes.
  *
  * Command: `/pi-usage-statistics` (TUI-only product; no web surface).
+ * CLI flag: `pi --usage` (boolean) opens the global-scope dashboard right
+ * after startup — a shell-free quick entry that reuses the same command
+ * logic (DRY), so behavior can never drift from the in-session command.
  *
  * Error pathway: every async handler is wrapped; failures are reported via
  * `ctx.ui.notify`/stdout and logged, never rethrown into Pi
  * (spec/typescript/error-handling.md).
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UsageRecord } from "./domain";
 import { UsageStore } from "./storage";
 import { collectMessageEnd } from "./runtime/collector";
@@ -91,13 +94,27 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
     }
   }, scanDebounceMs);
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     try {
       await store.init(); // idempotent: reload/new/resume re-run it safely
     } catch (error) {
       notifyError(ctx, "store init", error);
     }
     lastCtx = ctx;
+    // CLI quick entry: `pi --usage` opens the dashboard right after startup.
+    // `reason === "startup"` limits this to the initial launch — reload/new/
+    // resume/fork must not re-open the overlay. The strict `=== true` check
+    // keeps an unregistered/absent flag (undefined) or default (false) inert.
+    if (event.reason === "startup" && pi.getFlag("usage") === true) {
+      try {
+        // session_start delivers the base ExtensionContext; the command only
+        // reads base-context members (mode/ui/cwd/sessionManager), so this
+        // widening is safe and keeps commands.ts untouched (pure reuse, DRY).
+        await runUsageStatsCommand({ store, subscribeLive }, "", ctx as ExtensionCommandContext);
+      } catch (error) {
+        notifyError(ctx, "usage flag", error);
+      }
+    }
     scheduler.schedule(); // debounced, single-flight background scan
   });
 
@@ -145,6 +162,12 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
     } catch (error) {
       notifyError(ctx, "shutdown (store)", error);
     }
+  });
+
+  pi.registerFlag("usage", {
+    description: "Open the token-usage statistics dashboard at startup (global scope)",
+    type: "boolean",
+    default: false,
   });
 
   pi.registerCommand("pi-usage-statistics", {

@@ -54,9 +54,14 @@ function makeHarness(): {
   api: ExtensionAPI;
   handlers: Map<string, Handler[]>;
   commands: RegisteredCommand[];
+  flagValues: Map<string, boolean | string>;
 } {
   const handlers = new Map<string, Handler[]>();
   const commands: RegisteredCommand[] = [];
+  // CLI flag values: tests seed `flagValues.set("usage", true)` to simulate
+  // `pi --usage`; an explicit default in registerFlag seeds it once (mirrors
+  // real pi: boolean flag passed on the CLI always resolves to `true`).
+  const flagValues = new Map<string, boolean | string>();
   const api = {
     on: (event: string, handler: Handler) => {
       const list = handlers.get(event) ?? [];
@@ -64,8 +69,14 @@ function makeHarness(): {
       handlers.set(event, list);
     },
     registerCommand: (name: string, options: RegisteredCommand["options"]) => commands.push({ name, options }),
+    registerFlag: (name: string, options: { type: "boolean" | "string"; default?: boolean | string }) => {
+      if (options.default !== undefined && !flagValues.has(name)) {
+        flagValues.set(name, options.default);
+      }
+    },
+    getFlag: (name: string) => flagValues.get(name),
   } as unknown as ExtensionAPI;
-  return { api, handlers, commands };
+  return { api, handlers, commands, flagValues };
 }
 
 async function fire<E extends { type: string }>(handlers: Map<string, Handler[]>, event: E, ctx: ExtensionContext): Promise<void> {
@@ -546,6 +557,102 @@ describe("/pi-usage-statistics command", () => {
     component!.dispose();
   });
 
+});
+
+// --- --usage CLI flag quick entry -------------------------------------------
+
+describe("--usage CLI flag quick entry", () => {
+  it("flag=true + reason=startup + mode=tui opens the overlay (ctx.ui.custom called)", async () => {
+    const store = await makeStore();
+    const { api, handlers, flagValues } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    flagValues.set("usage", true); // simulate `pi --usage`
+    const ctx = makeCtx({ mode: "tui" });
+
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+
+    expect(vi.mocked(ctx.ui.custom)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ctx.ui.custom)).toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  it("flag=true + reason=startup + mode=print prints a text summary without TUI APIs", async () => {
+    const store = await makeStore();
+    const { api, handlers, flagValues } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    flagValues.set("usage", true);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      const ctx = makeCtx({ mode: "print" });
+      await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("requests:"));
+      expect(vi.mocked(ctx.ui.custom)).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("flag unregistered (getFlag undefined) + reason=startup does NOT trigger the command", async () => {
+    const store = await makeStore();
+    const { api, handlers, flagValues } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    // Simulate an extension that never registered the flag (or a pi runtime
+    // without it): getFlag resolves to undefined, never `=== true`.
+    flagValues.delete("usage");
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      const ctx = makeCtx({ mode: "tui" });
+      await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+      expect(vi.mocked(ctx.ui.custom)).not.toHaveBeenCalled();
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("flag default false (not passed) + reason=startup does NOT trigger the command", async () => {
+    const store = await makeStore();
+    const { api, handlers } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    // registerFlag seeds the default (false); the strict `=== true` check
+    // keeps the default-inert flag from opening the dashboard.
+    const ctx = makeCtx({ mode: "tui" });
+
+    await fire(handlers, { type: "session_start", reason: "startup" }, ctx);
+
+    expect(vi.mocked(ctx.ui.custom)).not.toHaveBeenCalled();
+  });
+
+  it("flag=true + reason=reload does NOT re-open the overlay", async () => {
+    const store = await makeStore();
+    const { api, handlers, flagValues } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    flagValues.set("usage", true);
+    const ctx = makeCtx({ mode: "tui" });
+
+    await fire(handlers, { type: "session_start", reason: "reload" }, ctx);
+
+    expect(vi.mocked(ctx.ui.custom)).not.toHaveBeenCalled();
+  });
+
+  it("regression: /pi-usage-statistics command stays registered with unchanged behavior", async () => {
+    const store = await makeStore();
+    const { api, commands } = makeHarness();
+    usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
+    expect(commands.find((command) => command.name === "pi-usage-statistics")).toBeDefined();
+
+    const handler = usageStatsCommand(commands);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const ctx = makeCtx({ mode: "print" });
+      await handler("", ctx);
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("requests:"));
+      expect(vi.mocked(ctx.ui.custom)).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
 });
 
 // --- RC4 / RC5 ----------------------------------------------------------------
