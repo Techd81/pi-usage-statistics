@@ -45,6 +45,8 @@
   | `t` | 循环时间范围：当天 → 1d → 7d → 14d → 30d → 1year → 全部 |
   | `Esc` | 返回（模型表 → 主视图）或关闭 |
 
+- **Standalone viewer / 独立查看器** — 安装本包后可直接运行 `pi-usage`（或 PowerShell wrapper `pi usage`）：不启动 pi 会话、不产生会话记录，htop 式打开同一面板（交互与上表一致），`Esc` 退出即回到终端（详见 [Terminal Quick Access](#terminal-quick-access--终端快速入口)）
+
 - **Multi-series trends** — 同屏叠加 Cost / Cache write / Cache read / Input / Output 五条序列
 - **Live updates / 实时刷新（秒级）** — 仪表盘打开期间双通道自动更新：成功的 `message_end` 先立即更新当前窗口内存，并异步持久化到共享 `records.jsonl`（连续消息会合并写入），本会话约 300ms 防抖刷新；**多窗口场景**每 0.5s 检测共享文件变化（变更后约 1 秒内自动重载上屏，另有每 5s 一次的强制校准兜底），其他仍在运行的 Pi 窗口产生的数据无需退出、重启或重新执行命令即可看到
 - **Cost traceability** — 优先使用 Pi 记录的 `cost`；否则按内置价表估算；无价格时显示 `--`（面板上不再标注 `~` / estimated 后缀，估算状态暂不出现在 TUI）
@@ -116,21 +118,24 @@ pi install npm:pi-token-usage-statistics
 
 ## Terminal Quick Access / 终端快速入口
 
-不想先进入 pi 会话？两种方式直接从终端打开统计 dashboard（默认 global scope，仪表盘内按 `p` / `g` 可切换项目 / 全局）。
+不想先进 pi 会话？安装本包后可直接运行独立统计查看器 `pi-usage`——htop 式 TUI，**不启动 pi 会话、不产生任何会话记录、无 LLM 调用**，按 `Esc` 退出后彻底回到终端。默认 global scope，面板内按 `p` / `g` 可切换项目 / 全局。
 
-### `pi --usage`（安装扩展后立即可用）
+### `pi-usage`（独立查看器 bin）
 
 ```bash
-pi --usage
+pi-usage           # 默认 global scope（全部本地会话）
+pi-usage project   # 当前工作目录 scope（records of process.cwd()）
 ```
 
-等价于启动 pi 会话后立即执行 `/pi-usage-statistics`（无参数，global scope）。按 `Esc` 关闭 dashboard 后停留在 pi 会话内，可继续正常对话——与在会话内执行命令的体验完全一致。非交互模式同样支持：`pi -p --usage` 输出文本摘要而不打开 TUI；`json` / `rpc` 模式遵循既有约定（静默 / notify），绝不污染输出流。
-
-> 注意：pi 的 flag 解析会把 `--usage` 后紧跟的普通参数吞作 flag 值（boolean flag 仍解析为 `true`），所以请勿在 `--usage` 后附带消息词，如 `pi --usage hello` 中 `hello` 不会作为消息发送。
+- 数据源与 pi 扩展共享同一份持久化数据（`<agent-dir>/token-usage-statistics/records.jsonl`），只读加载，不扫描 session 文件
+- 交互与 `/pi-usage-statistics` 面板完全一致：`p` / `g` 切换项目 / 全局、`m` 模型视图、`t` 时间范围、`Esc` 退出
+- **热更新**：查看器每 0.5s 轮询记录文件，其他窗口的 pi 会话产生新记录后约 1s 内刷新上屏
+- 非交互终端（管道 / CI）自动打印文本摘要后退出，不会挂起
+- 终端处理：备用屏 + 隐藏光标 + raw mode；`Esc` / `Ctrl+C` 退出时完整还原（备用屏、光标、raw mode）
 
 ### `pi usage`（PowerShell wrapper，可选）
 
-pi CLI 将位置参数一律当作消息处理，因此字面 `pi usage` 需要由 shell 层转发。运行一键安装脚本（幂等，可重复执行；会写入 / 更新 `$PROFILE`）：
+pi CLI 将位置参数一律当作消息处理，因此字面 `pi usage` 需要由 shell 层转发到独立查看器 `pi-usage`。运行一键安装脚本（幂等，可重复执行；会写入 / 更新 `$PROFILE`）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-pi-usage.ps1
@@ -138,10 +143,10 @@ powershell -ExecutionPolicy Bypass -File scripts/install-pi-usage.ps1
 
 脚本安装的 `pi` wrapper 函数：
 
-- `pi usage [args...]` → 转发为 `pi --usage [args...]`（等价于上方 `pi --usage`）
+- `pi usage [args...]` → 转发为 `pi-usage [args...]`（等价于直接运行 `pi-usage` 独立查看器）
 - `pi` 的其他用法（`pi -c`、`pi --help`、`pi install ...` 等）原样透传，行为不变
 
-wrapper 在新开的 PowerShell 会话中生效（或先执行 `. $PROFILE`）。**前提**：本扩展已安装并重启 Pi——`--usage` flag 由扩展注册，未安装时 pi CLI 会报 `Unknown option`。
+wrapper 在新开的 PowerShell 会话中生效（或先执行 `. $PROFILE`）。**前提**：已安装本包（`npm i -g pi-token-usage-statistics`，提供 `pi-usage` bin），并安装 pi 扩展以产生统计数据（`pi install git:github.com/Techd81/pi-usage-statistics`）。
 
 ## Data & Privacy / 数据与隐私
 

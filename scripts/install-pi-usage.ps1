@@ -1,13 +1,15 @@
 <#
 .SYNOPSIS
-    Install the `pi` wrapper function that translates `pi usage` -> `pi --usage`.
+    Install the `pi` wrapper function that translates `pi usage` -> `pi-usage`.
 
 .DESCRIPTION
     The pi CLI treats positional arguments as messages, so the literal form
     `pi usage` must be intercepted by a PowerShell wrapper function and
-    forwarded as `pi --usage` — the boolean CLI flag registered by the
-    pi-usage-statistics extension. Every other `pi` invocation passes through
-    unchanged.
+    forwarded to the standalone viewer `pi-usage` (the npm bin shipped by the
+    pi-usage-statistics package). `pi-usage` opens the statistics dashboard
+    directly WITHOUT starting a pi session — no AgentSession, no session
+    files, no LLM calls; Esc restores the terminal and exits. Every other
+    `pi` invocation passes through unchanged.
 
     The wrapper is installed idempotently into $PROFILE: any existing managed
     block (marked with `# === pi-usage-statistics wrapper ===`) is removed —
@@ -16,10 +18,12 @@
     copy of the latest wrapper version and never duplicates it.
 
 .NOTES
-    `pi usage` requires the pi-usage-statistics extension to be installed
-    FIRST (`pi install git:github.com/Techd81/pi-usage-statistics` and restart
-    pi) — the `--usage` flag is registered by the extension, and an unknown
-    flag is reported as `Unknown option` by the pi CLI.
+    `pi usage` requires the standalone viewer to be installed FIRST:
+      npm install -g pi-token-usage-statistics
+    The viewer reads the same durable records as the pi extension
+    (`<agent-dir>/token-usage-statistics/records.jsonl`), so the extension
+    should also be installed (`pi install git:github.com/Techd81/pi-usage-statistics`
+    and restart pi) — otherwise the dashboard has no data to show.
 
     The wrapper takes effect in NEW PowerShell sessions (or after `. $PROFILE`).
 #>
@@ -32,15 +36,15 @@ $markerStart = "# === pi-usage-statistics wrapper (managed by install-pi-usage.p
 $markerEnd   = "# === end pi-usage-statistics wrapper ==="
 
 # Single-quoted here-string: no variable expansion — the literal function body
-# is stored. The resolution uses `Get-Command -CommandType Application` (and
-# `ExternalScript` for pi.ps1), which excludes the wrapper function itself, so
-# the real pi executable is resolved (no recursion).
+# is stored. `pi` resolves with Get-Command -CommandType Application/ExternalScript,
+# which excludes the wrapper function itself, so the real pi executable is
+# resolved (no recursion). `pi-usage` is a SEPARATE npm bin, never the wrapper.
 $wrapper = @'
 # === pi-usage-statistics wrapper (managed by install-pi-usage.ps1) ===
-# Translates `pi usage [args...]` into `pi --usage [args...]` so the
-# pi-usage-statistics dashboard opens right after startup (global scope).
-# All other invocations pass through unchanged.
-# Requires the pi-usage-statistics extension to be installed (`pi install`).
+# Translates `pi usage [args...]` into `pi-usage [args...]` — the standalone
+# statistics viewer (htop-style TUI, no pi session, Esc to exit). All other
+# invocations pass through unchanged.
+# Requires the pi-usage-statistics package to be installed (`npm i -g`).
 function pi {
     $realPi = $script:piUsageRealCommand
     if (-not $realPi) {
@@ -55,7 +59,15 @@ function pi {
         $script:piUsageRealCommand = $realPi
     }
     if ($args.Count -gt 0 -and $args[0] -eq 'usage') {
-        & $realPi --usage @($args | Select-Object -Skip 1)
+        $rest = @($args | Select-Object -Skip 1)
+        # pi-usage is a distinct npm bin (pi-usage.cmd / pi-usage.ps1); resolve
+        # it explicitly so the viewer is found even when invoked as `pi usage`.
+        $usageBin = Get-Command pi-usage -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $usageBin) {
+            Write-Error 'pi-usage not found on PATH — install the pi-usage-statistics package (npm i -g pi-token-usage-statistics)'
+            return
+        }
+        & $usageBin.Source @rest
     } else {
         & $realPi @args
     }
@@ -113,12 +125,12 @@ if ($hadManaged) {
 }
 Write-Host ""
 Write-Host "  Now you can run:  pi usage" -ForegroundColor Cyan
-Write-Host "  Equivalent to:     pi --usage  (opens the usage dashboard at startup)"
+Write-Host "  Equivalent to:     pi-usage  (standalone viewer — no pi session, Esc to exit)"
 Write-Host "  All other pi calls (pi -c, pi --help, pi install ...) pass through unchanged."
 Write-Host ""
 Write-Host "  Requirements:" -ForegroundColor Yellow
-Write-Host "    - pi-usage-statistics extension installed (pi install git:github.com/Techd81/pi-usage-statistics)"
-Write-Host "    - restart pi after installing the extension"
+Write-Host "    - pi-usage-statistics package installed (npm i -g pi-token-usage-statistics)"
+Write-Host "    - pi extension installed for data (pi install git:github.com/Techd81/pi-usage-statistics)"
 Write-Host ""
 Write-Host "  The wrapper applies to NEW PowerShell sessions (or run: . $PROFILE)."
 Write-Host ""

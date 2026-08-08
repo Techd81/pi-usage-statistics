@@ -14,10 +14,14 @@
   },
   "files": [
     "src",
+    "dist",
     "images",
     "README.md",
     "LICENSE"
   ],
+  "bin": {
+    "pi-usage": "./dist/standalone/main.js"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -36,14 +40,19 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/standalone/main.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/standalone/main.js --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.84.0"
+  },
   "devDependencies": {
-    "@earendil-works/pi-tui": "^0.84.0",
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

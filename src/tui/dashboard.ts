@@ -251,6 +251,17 @@ export class UsageDashboardComponent {
     this.unsubscribeLive = null;
   }
 
+  /**
+   * External refresh entry (standalone viewer / tests): re-query the store
+   * and request a re-render. The embedded overlay never calls this — its
+   * live updates flow through `subscribeLive`; this is the hot-update hook
+   * for the standalone `pi-usage` viewer's disk poller.
+   */
+  refreshNow(): void {
+    this.refresh();
+    this.requestRender();
+  }
+
   handleInput(data: string): void {
     switch (data) {
       case "p":
