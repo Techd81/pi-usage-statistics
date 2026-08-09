@@ -1,20 +1,6 @@
 <div align="center">
 
-```
-                                                     ████████████╗                                                     
-                                                     ╚═██╔═══██╔═╝                                                     
-                                                       ██║   ██║                                                       
-                                                       ██║   ██║                                                       
-                                                       ██║   ██║                                                       
-                                                       ╚═╝   ╚═╝                                                       
-
-██╗   ██╗███████╗ █████╗  ██████╗ ███████╗    ███████╗████████╗ █████╗ ████████╗██╗███████╗████████╗██╗ ██████╗███████╗
-██║   ██║██╔════╝██╔══██╗██╔════╝ ██╔════╝    ██╔════╝╚══██╔══╝██╔══██╗╚══██╔══╝██║██╔════╝╚══██╔══╝██║██╔════╝██╔════╝
-██║   ██║███████╗███████║██║  ███╗█████╗      ███████╗   ██║   ███████║   ██║   ██║███████╗   ██║   ██║██║     ███████╗
-██║   ██║╚════██║██╔══██║██║   ██║██╔══╝      ╚════██║   ██║   ██╔══██║   ██║   ██║╚════██║   ██║   ██║██║     ╚════██║
-╚██████╔╝███████║██║  ██║╚██████╔╝███████╗    ███████║   ██║   ██║  ██║   ██║   ██║███████║   ██║   ██║╚██████╗███████║
- ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝╚══════╝   ╚═╝   ╚═╝ ╚═════╝╚══════╝
-```
+<img src="images/logo.png" alt="Pi Usage Statistics" width="600" />
 
 </div>
 
@@ -133,20 +119,30 @@ pi-usage project   # 当前工作目录 scope（records of process.cwd()）
 - 非交互终端（管道 / CI）自动打印文本摘要后退出，不会挂起
 - 终端处理：备用屏 + 隐藏光标 + raw mode；`Esc` / `Ctrl+C` 退出时完整还原（备用屏、光标、raw mode）
 
-### `pi usage`（PowerShell wrapper，可选）
+### `pi usage`（shell wrapper，可选）
 
-pi CLI 将位置参数一律当作消息处理，因此字面 `pi usage` 需要由 shell 层转发到独立查看器 `pi-usage`。运行一键安装脚本（幂等，可重复执行；会写入 / 更新 `$PROFILE`）：
+pi CLI 将位置参数一律当作消息处理，因此字面 `pi usage` 需要由 shell 层转发到独立查看器 `pi-usage`。运行一键安装脚本（幂等，可重复执行；重复运行始终收敛为单份最新 wrapper，绝不重复）：
+
+**Windows（PowerShell）**：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-pi-usage.ps1
 ```
 
+**macOS / Linux（bash / zsh）**：
+
+```bash
+bash scripts/install-pi-usage.sh            # 自动检测 $SHELL（bash → ~/.bashrc，zsh → ~/.zshrc）
+bash scripts/install-pi-usage.sh --shell zsh # 或显式指定 rc 文件
+bash scripts/install-pi-usage.sh --uninstall # 卸载
+```
+
 脚本安装的 `pi` wrapper 函数：
 
-- `pi usage [args...]` → 转发为 `pi-usage [args...]`（等价于直接运行 `pi-usage` 独立查看器）
+- `pi usage [args...]` → 转发为 `pi-usage [args...]`（等价于直接运行 `pi-usage` 独立查看器，子进程方式运行，不替换当前 shell）
 - `pi` 的其他用法（`pi -c`、`pi --help`、`pi install ...` 等）原样透传，行为不变
 
-wrapper 在新开的 PowerShell 会话中生效（或先执行 `. $PROFILE`）。**前提**：已安装本包（`npm i -g pi-token-usage-statistics`，提供 `pi-usage` bin），并安装 pi 扩展以产生统计数据（`pi install git:github.com/Techd81/pi-usage-statistics`）。
+wrapper 在新开的 shell 会话中生效（或先执行 `. $PROFILE` / `source ~/.bashrc`）。**前提**：已安装本包（`npm i -g pi-token-usage-statistics`，提供 `pi-usage` bin），并安装 pi 扩展以产生统计数据（`pi install git:github.com/Techd81/pi-usage-statistics`）。
 
 ## Data & Privacy / 数据与隐私
 

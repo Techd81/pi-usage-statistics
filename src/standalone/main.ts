@@ -122,6 +122,20 @@ export function restoreTerminal(): void {
   }
 }
 
+/**
+ * Initialize the store and merge the latest durable file (B3).
+ *
+ * `init()` loads this process's local cache; `reloadFromDisk()` then picks up
+ * records written by OTHER pi processes since the cache was last persisted, so
+ * a freshly opened viewer already shows the newest cross-window data instead
+ * of waiting for the next disk change + poll tick. Failures are non-fatal for
+ * the reload (init errors still propagate to the caller's error path).
+ */
+export async function prepareStore(store: UsageStore): Promise<void> {
+  await store.init();
+  await store.reloadFromDisk();
+}
+
 /** Run the interactive TUI loop; resolves with the process exit code. */
 function runTui(store: UsageStore, scope: Scope, cwd: string, theme: DashboardTheme): Promise<number> {
   return new Promise((resolveExit) => {
@@ -239,7 +253,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 
   const store = new UsageStore();
   try {
-    await store.init();
+    await prepareStore(store);
   } catch (error) {
     restoreTerminal();
     const detail = error instanceof Error ? error.message : String(error);

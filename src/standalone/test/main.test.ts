@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageStore } from "../../storage";
 import { makeRecord } from "../../storage/test/helpers";
 import { noopTheme, UsageDashboardComponent } from "../../tui/dashboard";
-import { ansiTheme, buildSummary, paintLines, parseScope, resolveTheme, UsageError } from "../main";
+import { ansiTheme, buildSummary, paintLines, parseScope, prepareStore, resolveTheme, UsageError } from "../main";
 
 // --- Mock the Pi runtime module (UsageStore's constructor calls getAgentDir) -
 
@@ -125,6 +125,34 @@ describe("buildSummary", () => {
     expect(text).toContain("requests:");
     expect(text).toContain("scope:         project (/work/p1)");
     expect(text).toContain("total tokens:  10");
+  });
+});
+
+// --- prepareStore (B3) ---------------------------------------------------------
+
+describe("prepareStore", () => {
+  it("loads durable records written by another process before the viewer opens", async () => {
+    const store = new UsageStore({ storeDir });
+    // Simulate another pi process having written records to disk already.
+    const other = new UsageStore({ storeDir });
+    await other.init();
+    other.upsertRecord(
+      makeRecord({ sessionId: "s1", sourceEntryId: "e1", timestampMs: Date.now(), inputTokens: 7, outputTokens: 3 }),
+    );
+    await other.persistLiveRecord();
+
+    await prepareStore(store);
+    const result = store.query({ providers: [], models: [], projects: [], sessions: [], fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false });
+    expect(result.totals.totalTokens).toBe(10);
+    expect(result.totals.requestCount).toBe(1);
+  });
+
+  it("is idempotent on an empty store (no throw, empty result)", async () => {
+    const store = new UsageStore({ storeDir });
+    await expect(prepareStore(store)).resolves.toBeUndefined();
+    const result = store.query({ providers: [], models: [], projects: [], sessions: [], fromMs: 0, toMs: Number.POSITIVE_INFINITY, bucketMs: 30_000, includeSummaryUsage: false });
+    expect(result.totals.totalTokens).toBe(0);
+    expect(result.totals.requestCount).toBe(0);
   });
 });
 

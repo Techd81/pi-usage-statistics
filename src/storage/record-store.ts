@@ -9,7 +9,7 @@
 import { mkdir, open, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CostBreakdown, UsageFilters, UsageQueryResult, UsageRecord } from "../domain";
-import { indexByRecordId, mergeRecords, queryUsage, upsertRecord } from "../domain";
+import { indexByRecordId, mergeRecords, queryUsage } from "../domain";
 
 /** Schema version of the durable index; bump on incompatible format changes. */
 export const STORE_SCHEMA_VERSION = 1;
@@ -165,33 +165,58 @@ const isUsageRecordLike = (value: unknown): value is UsageRecord => {
  * Read a JSONL file defensively: a malformed or truncated final line is
  * skipped (counted) instead of failing the whole read. Returns the parsed
  * records plus the number of skipped lines.
+ *
+ * Lines are scanned with indexOf instead of split("\n") so an 11MB file
+ * never materializes a full line array + per-line string copies (P6).
+ * JSON.stringify escapes embedded newlines, so a raw \n always separates
+ * records — no line can span multiple physical lines.
  */
 function readRecordsJsonl(text: string): { records: UsageRecord[]; skipped: number } {
   const records: UsageRecord[] = [];
   let skipped = 0;
-  const lines = text.split("\n");
-  // A trailing newline produces an empty final element; drop it.
-  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  for (const line of lines) {
-    if (line.trim() === "") continue;
-    try {
-      const value = JSON.parse(line) as unknown;
-      if (isUsageRecordLike(value)) {
-        records.push(value);
-      } else {
-        skipped += 1;
+  let start = 0;
+  while (start < text.length) {
+    const end = text.indexOf("\n", start);
+    const lineEnd = end === -1 ? text.length : end;
+    const line = text.slice(start, lineEnd);
+    if (line.trim() !== "") {
+      try {
+        const value = JSON.parse(line) as unknown;
+        if (isUsageRecordLike(value)) {
+          records.push(value);
+        } else {
+          skipped += 1;
+        }
+      } catch {
+        skipped += 1; // malformed or truncated final line
       }
-    } catch {
-      skipped += 1; // malformed or truncated final line
     }
+    if (end === -1) break;
+    start = end + 1;
   }
   return { records, skipped };
 }
+
+/** Serialize records as one JSON line each, with a trailing newline. */
+const serializeRecords = (records: readonly UsageRecord[]): string =>
+  records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
+
+/** Count physical lines (\n-separated) without allocating a line array. */
+const countLines = (text: string): number => {
+  let count = 0;
+  let index = -1;
+  while ((index = text.indexOf("\n", index + 1)) !== -1) count += 1;
+  return count;
+};
 
 export class RecordStore {
   private readonly storeDir: string;
   private readonly maxRecords: number;
   private records: UsageRecord[] = [];
+  /** recordId → index into `records`; kept in sync with every mutation (P2). */
+  private recordIndex = new Map<string, number>();
+  /** recordIds changed/added since the last successful flush (append-only write set). */
+  private dirtyRecordIds = new Set<string>();
   private currentSchemaVersion = STORE_SCHEMA_VERSION;
   private dirty = false;
   /** Changes made while an async flush is in progress must not be clobbered. */
@@ -225,9 +250,12 @@ export class RecordStore {
     return queryUsage(this.records, filters, refreshedAtMs);
   }
 
-  /** Upsert one record by recordId and mark the store dirty for persistence. */
+  /**
+   * Upsert one record by recordId (O(1) via the recordIndex) and mark the
+   * store dirty for persistence.
+   */
   upsertRecord(record: UsageRecord): void {
-    this.records = upsertRecord(this.records, record);
+    this.upsertInternal(record);
     this.mutationRevision += 1;
     this.dirty = true;
   }
@@ -235,17 +263,32 @@ export class RecordStore {
   /** Replace all in-memory records with a scanned set (dedupe by recordId). */
   replaceAll(records: readonly UsageRecord[]): void {
     this.records = [...indexByRecordId(records).values()];
+    this.recordIndex = new Map(this.records.map((record, i) => [record.recordId, i]));
+    for (const record of this.records) this.dirtyRecordIds.add(record.recordId);
     this.mutationRevision += 1;
     this.dirty = true;
   }
 
   /** Merge scanned records into the store; later records win per recordId. */
   merge(records: readonly UsageRecord[]): void {
-    this.records = mergeRecords(this.records, records);
+    if (records.length === 0) return; // nothing changed, nothing to persist
+    for (const record of records) this.upsertInternal(record);
     this.mutationRevision += 1;
-    // mergeRecords may have replaced values even when the length is unchanged,
-    // so always mark the store dirty (conservative).
+    // upsertInternal may have replaced values even when the length is
+    // unchanged, so always mark the store dirty (conservative).
     this.dirty = true;
+  }
+
+  /** Shared upsert core: O(1) index lookup, keeps `records`/`recordIndex` in sync. */
+  private upsertInternal(record: UsageRecord): void {
+    const index = this.recordIndex.get(record.recordId);
+    if (index === undefined) {
+      this.recordIndex.set(record.recordId, this.records.length);
+      this.records.push(record);
+    } else {
+      this.records[index] = record;
+    }
+    this.dirtyRecordIds.add(record.recordId);
   }
 
   /**
@@ -264,8 +307,13 @@ export class RecordStore {
       text = ""; // absent file = fresh store
     }
     const { records, skipped } = readRecordsJsonl(text);
-    this.records = records;
-    this.loadedRecordIds = new Set(records.map((record) => record.recordId));
+    // Collapse duplicate recordIds (last line wins): append-only writes can
+    // legitimately leave repeated ids on disk, and the in-memory array must
+    // stay unique — query-time dedupe remains as a defensive backstop (B4).
+    this.records = [...indexByRecordId(records).values()];
+    this.recordIndex = new Map(this.records.map((record, i) => [record.recordId, i]));
+    this.loadedRecordIds = new Set(this.records.map((record) => record.recordId));
+    this.dirtyRecordIds.clear();
     this.mutationRevision += 1;
     this.dirty = skipped > 0; // a truncated tail warrants a rewrite on next flush
 
@@ -283,6 +331,7 @@ export class RecordStore {
       // Deterministic rebuild on schema mismatch (SC4): drop cached payload,
       // let the scanner repopulate from sessions.
       this.records = [];
+      this.recordIndex.clear();
       // Keep loadedRecordIds: replaceDisk can then discard this known-stale
       // cache while preserving distinct records another process adds later.
       this.currentSchemaVersion = STORE_SCHEMA_VERSION;
@@ -292,20 +341,32 @@ export class RecordStore {
   }
 
   /**
-   * Persist the in-memory state atomically. Normal writes merge with the
-   * current shared file under the lock; an explicit replacement is reserved
-   * for full rebuilds, whose scanner contract purges stale cache records.
+   * Persist the in-memory state atomically. All reads/writes happen under the
+   * process-safe lock so concurrent Pi windows never lose each other's
+   * records (P1):
+   *
+   * - `replaceDisk` (rebuild): full rewrite that keeps recordIds added by
+   *   another process after this instance's last load (`loadedRecordIds`);
+   * - append-only: only the records changed since the last flush are appended
+   *   as new JSONL lines — the file grows by exactly the delta instead of a
+   *   full read/parse/rewrite of an 11MB file per `message_end`;
+   * - compact: when the file exceeds `maxRecords` lines (historical duplicate
+   *   rows) or a load skipped malformed lines, rewrite the file with unique
+   *   records only, so the previously no-op compaction bound really bounds
+   *   the file (B1).
+   *
+   * Readers collapse duplicate recordIds (last line wins), so appended
+   * replacement rows are numerically exact; `load()` dedupes into a unique
+   * in-memory array (B4).
    */
   async flush(options: { replaceDisk?: boolean } = {}): Promise<void> {
     await withWriteLock(this.recordsFilePath, async () => {
-      // Always merge under the lock. A process may have loaded an older
-      // private snapshot while another Pi window has since appended records.
-      // Replacing the file from that snapshot would lose the other window's
-      // distinct recordIds.
-      let diskRecords: UsageRecord[] = [];
+      // Always read the current file under the lock. A process may have loaded
+      // an older private snapshot while another Pi window has since appended
+      // records — the write below must never drop the other window's rows.
+      let text = "";
       try {
-        const text = await readFile(this.recordsFilePath, "utf8");
-        diskRecords = readRecordsJsonl(text).records;
+        text = await readFile(this.recordsFilePath, "utf8");
       } catch (error) {
         // Only a missing file is a normal first-write case. Permission and
         // other read failures must abort rather than replacing unknown data.
@@ -314,21 +375,51 @@ export class RecordStore {
 
       const revision = this.mutationRevision;
       const localRecords = [...this.records];
-      // A rebuild intentionally replaces this instance's old cache, but must
-      // retain record IDs added by another process after our last load. This
-      // avoids turning a full scan into a cross-process lost update.
-      const rebuildExternal = diskRecords.filter((record) => !this.loadedRecordIds.has(record.recordId));
-      const merged = options.replaceDisk ? mergeRecords(rebuildExternal, localRecords) : mergeRecords(diskRecords, localRecords);
-      const durableRecords = merged.length > this.maxRecords ? [...indexByRecordId(merged).values()] : merged;
-      const lines = durableRecords.map((record) => JSON.stringify(record)).join("\n") + (durableRecords.length > 0 ? "\n" : "");
-      await atomicWrite(this.recordsFilePath, lines);
+      // Set when the file was fully rewritten; the memory snapshot is then
+      // synced to the durable set on success.
+      let durableRecords: UsageRecord[] | null = null;
+
+      if (options.replaceDisk) {
+        // A rebuild intentionally replaces this instance's old cache, but must
+        // retain record IDs added by another process after our last load. This
+        // avoids turning a full scan into a cross-process lost update.
+        const diskRecords = readRecordsJsonl(text).records;
+        const rebuildExternal = diskRecords.filter((record) => !this.loadedRecordIds.has(record.recordId));
+        durableRecords = mergeRecords(rebuildExternal, localRecords);
+        await atomicWrite(this.recordsFilePath, serializeRecords(durableRecords));
+      } else if (this.dirty) {
+        if (this.dirtyRecordIds.size > 0 && countLines(text) <= this.maxRecords) {
+          // Append-only: only records changed since the last flush. Rows for
+          // ids already on disk get a new (winning) line; compaction rewrites
+          // the file when the line count exceeds maxRecords.
+          const appendLines = localRecords
+            .filter((record) => this.dirtyRecordIds.has(record.recordId))
+            .map((record) => JSON.stringify(record));
+          if (appendLines.length > 0) {
+            const body = text.length > 0 && !text.endsWith("\n") ? `${text}\n` : text;
+            await atomicWrite(this.recordsFilePath, `${body}${appendLines.join("\n")}\n`);
+          }
+        } else {
+          // Compact: unique rewrite. Reached when the line count exceeds
+          // maxRecords (historical duplicates) or a load skipped malformed
+          // lines (dirty with no dirty ids to append).
+          const diskRecords = readRecordsJsonl(text).records;
+          durableRecords = [...indexByRecordId(mergeRecords(diskRecords, localRecords)).values()];
+          await atomicWrite(this.recordsFilePath, serializeRecords(durableRecords));
+        }
+      }
+
       await atomicWrite(
         this.indexFilePath,
         JSON.stringify({ schemaVersion: this.currentSchemaVersion, updatedAtMs: Date.now() }, null, 2),
       );
       if (this.mutationRevision === revision) {
-        this.records = durableRecords;
-        this.loadedRecordIds = new Set(durableRecords.map((record) => record.recordId));
+        if (durableRecords !== null) {
+          this.records = durableRecords;
+          this.recordIndex = new Map(durableRecords.map((record, i) => [record.recordId, i]));
+          this.loadedRecordIds = new Set(durableRecords.map((record) => record.recordId));
+        }
+        this.dirtyRecordIds.clear();
         this.dirty = false;
       }
     });
@@ -337,6 +428,8 @@ export class RecordStore {
   /** Drop all persisted state and in-memory records; the store starts fresh. */
   async reset(): Promise<void> {
     this.records = [];
+    this.recordIndex.clear();
+    this.dirtyRecordIds.clear();
     this.loadedRecordIds.clear();
     this.currentSchemaVersion = STORE_SCHEMA_VERSION;
     this.mutationRevision += 1;

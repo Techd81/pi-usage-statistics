@@ -228,6 +228,19 @@ describe("formatDateTimeCompact / formatDateRange", () => {
     expect(displayWidth("2026-08-07 00:00 - 2026-08-07 16:15")).toBe(35);
   });
 
+  it("counts Greek/Cyrillic and other narrow scripts as 1 column (C1)", () => {
+    // U+0100–U+10FF (Greek μ/π/Δ, Cyrillic) are narrow glyphs — counting them
+    // as 2 would shift the outer frame right border inward.
+    expect(displayWidth("αβγ")).toBe(3);
+    expect(displayWidth("π")).toBe(1); // title-banner π is a narrow Greek pi
+    expect(displayWidth("µs")).toBe(2);
+    expect(displayWidth("Δx")).toBe(2);
+    expect(displayWidth("Привет")).toBe(6);
+    // CJK stays 2 columns.
+    expect(displayWidth("α中文")).toBe(5);
+    expect(displayWidth("π USAGE STATISTICS")).toBe(18); // 1 + 1 + 16
+  });
+
   it("ignores emoji variation selectors when measuring width", () => {
     expect(displayWidth("⚡\uFE0F")).toBe(displayWidth("⚡"));
   });

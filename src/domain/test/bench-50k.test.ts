@@ -1,31 +1,60 @@
 /**
  * R5 性能压力测试：模拟 5 万条上限记录，跑插件 queryUsage（today / all + 趋势），
  * 记录耗时基准。通过 vitest 运行以获得与生产一致的类型/导入路径。
+ *
+ * 数据为确定性合成记录（不依赖用户真实数据文件，CI 可复现）。当环境变量
+ * PI_USAGE_REAL_FILE 指向真实 records.jsonl 时，额外输出真实数据基准日志
+ * （仅日志，不做断言——真实文件并非测试环境的一部分）。
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { queryUsage, DEFAULT_BUCKET_MS } from "../aggregate";
+import type { UsageRecord } from "../types";
 
-const STORE_FILE = join(homedir(), ".pi/agent/token-usage-statistics/records.jsonl");
 const DAY_MS = 86_400_000;
-
 const now = Date.now();
 
-/** 复制真实记录并重排 recordId/timestamp，合成 5 万条。 */
-function synthRecords(count: number) {
-  const base = readFileSync(STORE_FILE, "utf8")
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l));
-  const records: typeof base = [];
-  let i = 0;
-  while (records.length < count) {
-    const r = base[i % base.length]!;
-    const copy = { ...r, recordId: `${r.recordId}#${i}`, timestampMs: r.timestampMs - (i % 30) * DAY_MS };
-    records.push(copy);
-    i++;
+/**
+ * Deterministic synthetic records: unique recordIds, provider/model drawn from
+ * a small pool, timestamps spread over the last 30 days (so both the today
+ * window and the all-time trend carry data). Same shape as real normalized
+ * records — enough to exercise the full aggregation path.
+ */
+function synthRecords(count: number): UsageRecord[] {
+  const providers = ["anthropic", "openai", "google", "deepseek"];
+  const models = ["claude-sonnet-4-5", "claude-opus-4-1", "gpt-4o", "gpt-4o-mini", "gemini-2.5-pro", "deepseek-chat"];
+  const records: UsageRecord[] = [];
+  for (let i = 0; i < count; i++) {
+    const inputTokens = (i % 5000) + 100;
+    const outputTokens = (i % 2000) + 50;
+    const cacheReadTokens = i % 4 === 0 ? i % 3000 : 0;
+    const totalTokens = inputTokens + outputTokens + cacheReadTokens;
+    records.push({
+      recordId: `s${i % 50}:e${i}`,
+      sessionId: `s${i % 50}`,
+      sessionPath: `/sessions/s${i % 50}.jsonl`,
+      projectCwd: `/projects/p${i % 7}`,
+      // 0–29 天前 + 亚秒级偏移：today 窗口内保留 (i % 30 === 0) 的记录。
+      timestampMs: now - (i % 30) * DAY_MS - (i % 1000),
+      provider: providers[i % providers.length]!,
+      model: models[i % models.length]!,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens: 0,
+      totalTokens,
+      requestCount: 1,
+      costKind: "recorded",
+      recordedCost: {
+        input: inputTokens * 0.000003,
+        output: outputTokens * 0.000015,
+        cacheRead: cacheReadTokens * 0.0000003,
+        cacheWrite: 0,
+        total: inputTokens * 0.000003 + outputTokens * 0.000015 + cacheReadTokens * 0.0000003,
+      },
+      sourceEntryId: `e${i}`,
+      sourceKind: "assistant",
+    });
   }
   return records;
 }
@@ -72,5 +101,17 @@ describe("R5: 5 万条上限性能基准", () => {
     expect(todayMs).toBeLessThan(50);
     expect(allMs).toBeLessThan(50);
     expect(today!.totals.requestCount).toBeGreaterThan(0);
+
+    // 可选：真实数据基准（仅日志，不做断言）。
+    const realFile = process.env.PI_USAGE_REAL_FILE;
+    if (realFile) {
+      const real = readFileSync(realFile, "utf8")
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l));
+      const realTodayMs = bestOf(() => queryUsage(real, filters(dayStart.getTime()), now));
+      const realAllMs = bestOf(() => queryUsage(real, filters(0), now));
+      console.log(`真实数据 (${real.length} 条) → today: ${realTodayMs.toFixed(1)}ms | all: ${realAllMs.toFixed(1)}ms`);
+    }
   });
 });

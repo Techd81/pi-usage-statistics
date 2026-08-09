@@ -409,6 +409,19 @@ describe("pathsMatch / normalizePath (D3 路径归一化)", () => {
     expect(pathsMatch("", "")).toBe(true);
   });
 
+  it("normalizePath 缓存不改变结果，且缓存命中与冷算一致（P3）", () => {
+    // 同一输入多次调用（走缓存）与首次冷算结果必须完全一致。
+    const input = "D:\\PI-USAGE-STATISTICS\\";
+    const first = normalizePath(input);
+    expect(normalizePath(input)).toBe(first); // 缓存命中
+    expect(normalizePath(input)).toBe("d:/pi-usage-statistics");
+    // 缓存对空串与短路径同样稳定。
+    expect(normalizePath("")).toBe("");
+    expect(normalizePath("D:\\")).toBe("d:");
+    // 大小写/斜杠变体互不影响缓存正确性。
+    expect(pathsMatch(input, "d:/pi-usage-statistics")).toBe(true);
+  });
+
   it("project 过滤对路径变体不敏感（AC3）", () => {
     const record = makeRecord({ projectCwd: "D:\\pi-usage-statistics", inputTokens: 10, timestampMs: BASE_TS });
     const cases: string[][] = [

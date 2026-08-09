@@ -102,6 +102,11 @@ const SERIES: readonly SeriesSpec[] = [
 /** Legend order matching the product reference (Cost first). */
 const LEGEND_ORDER = ["Cost", "Cache write", "Cache read", "Input", "Output"] as const;
 
+/** Precomputed legend → token-series index (avoids per-paint filter+findIndex, P5). */
+const TOKEN_SERIES_INDEX = new Map<string, number>(
+  SERIES.filter((s) => s.scale === "token").map((s, i) => [s.legend, i]),
+);
+
 type Cell = { ch: string; series: number | null; zero: boolean };
 
 type Sampled = {
@@ -356,7 +361,7 @@ export function renderTrendChart(trend: readonly TrendPoint[], options: TrendCha
       if (spec.scale === "cost") {
         samples = cost;
       } else {
-        const tokenIdx = SERIES.filter((s) => s.scale === "token").findIndex((s) => s.legend === spec.legend);
+        const tokenIdx = TOKEN_SERIES_INDEX.get(spec.legend) ?? -1;
         samples = tokenSeries[tokenIdx] ?? [];
       }
       const max = spec.scale === "cost" ? costMax : tokenMax;

@@ -63,10 +63,21 @@ export function validateFilters(value: unknown): UsageFilters | null {
  * 仅用于过滤比较，不修改存储数据。权衡：toLowerCase 在大小写敏感文件系统
  * （Linux/macOS）上可能合并两个仅大小写不同的目录——本项目以 Windows 为主，
  * 且归一化只影响比较不影响数据，接受此取舍（D3）。
+ *
+ * 结果带模块级缓存（上限 NORMALIZE_CACHE_MAX 项，超出清空防无界增长）：
+ * 项目过滤逐记录比较时避免对同一条路径反复 replace + toLowerCase（P3）。
  */
+const NORMALIZE_CACHE_MAX = 2048;
+const normalizeCache = new Map<string, string>();
+
 export function normalizePath(p: string): string {
+  const cached = normalizeCache.get(p);
+  if (cached !== undefined) return cached;
   const s = p.replace(/\\/g, "/").toLowerCase();
-  return s.length > 1 ? s.replace(/\/+$/, "") : s;
+  const norm = s.length > 1 ? s.replace(/\/+$/, "") : s;
+  if (normalizeCache.size >= NORMALIZE_CACHE_MAX) normalizeCache.clear();
+  normalizeCache.set(p, norm);
+  return norm;
 }
 
 /** 项目路径匹配：归一化后相等（大小写 / 斜杠 / 尾斜杠不敏感）。 */
@@ -82,7 +93,12 @@ const matches = (record: UsageRecord, filters: UsageFilters): boolean => {
   if (record.timestampMs < filters.fromMs || record.timestampMs > filters.toMs) return false;
   if ((filters.providers?.length ?? 0) > 0 && !filters.providers!.includes(record.provider)) return false;
   if ((filters.models?.length ?? 0) > 0 && !filters.models!.includes(record.model)) return false;
-  if ((filters.projects?.length ?? 0) > 0 && !filters.projects!.some((p) => pathsMatch(p, record.projectCwd))) return false;
+  // 项目路径：filter 侧预归一化一次，记录侧经缓存归一化后比较（P3）——
+  // 语义与 pathsMatch 完全一致（大小写 / 斜杠 / 尾斜杠不敏感）。
+  if ((filters.projects?.length ?? 0) > 0) {
+    const normalizedProjects = filters.projects!.map((p) => normalizePath(p));
+    if (!normalizedProjects.includes(normalizePath(record.projectCwd))) return false;
+  }
   if ((filters.sessions?.length ?? 0) > 0 && !filters.sessions!.includes(record.sessionId)) return false;
   return true;
 };
@@ -116,19 +132,27 @@ export function aggregateCost(records: readonly UsageRecord[]): AggregatedCost {
 }
 
 /**
+ * Cost display from pre-aggregated provenance sums (single-pass callers reuse
+ * this instead of re-walking the record set — DRY with `costDisplay`).
+ */
+const costDisplayFromSums = (recorded: number, estimated: number, unavailableCount: number, count: number): CostDisplay => {
+  if (count === 0) return { amount: 0, status: "recorded", currency: COST_CURRENCY };
+  if (unavailableCount > 0) return { amount: null, status: "unavailable", currency: COST_CURRENCY };
+  const amount = recorded + estimated;
+  if (recorded > 0 && estimated > 0) return { amount, status: "mixed", currency: COST_CURRENCY };
+  if (estimated > 0) return { amount, status: "estimated", currency: COST_CURRENCY };
+  return { amount, status: "recorded", currency: COST_CURRENCY };
+};
+
+/**
  * Aggregate cost display policy:
  * - empty set -> $0 with "recorded" status (a zero-request aggregate is well defined);
  * - any unavailable record -> amount null ("--"), status "unavailable" (DC3);
  * - otherwise amount = recorded + estimated, status by provenance mix.
  */
 export function costDisplay(records: readonly UsageRecord[]): CostDisplay {
-  if (records.length === 0) return { amount: 0, status: "recorded", currency: COST_CURRENCY };
   const { recorded, estimated, unavailableCount } = aggregateCost(records);
-  if (unavailableCount > 0) return { amount: null, status: "unavailable", currency: COST_CURRENCY };
-  const amount = recorded + estimated;
-  if (recorded > 0 && estimated > 0) return { amount, status: "mixed", currency: COST_CURRENCY };
-  if (estimated > 0) return { amount, status: "estimated", currency: COST_CURRENCY };
-  return { amount, status: "recorded", currency: COST_CURRENCY };
+  return costDisplayFromSums(recorded, estimated, unavailableCount, records.length);
 }
 
 const distinctSorted = (values: string[]): string[] =>
@@ -166,13 +190,24 @@ function buildByModel(records: readonly UsageRecord[]): ModelUsage[] {
   }
   return [...byModel.entries()]
     .map(([model, modelRecords]) => {
+      // 单遍聚合（P4）：requestCount / totalTokens / 成本三组量一次遍历完成。
       let requestCount = 0;
       let totalTokens = 0;
+      let recorded = 0;
+      let estimated = 0;
+      let unavailableCount = 0;
       for (const record of modelRecords) {
         if (record.sourceKind === "assistant") requestCount += record.requestCount;
         totalTokens += record.totalTokens;
+        if (record.costKind === "recorded" && record.recordedCost) {
+          recorded += record.recordedCost.total;
+        } else if (record.costKind === "estimated" && record.estimatedCost) {
+          estimated += record.estimatedCost.total;
+        } else {
+          unavailableCount += 1;
+        }
       }
-      const cost = costDisplay(modelRecords);
+      const cost = costDisplayFromSums(recorded, estimated, unavailableCount, modelRecords.length);
       return { model, requestCount, totalTokens, cost, avgCost: avgCostDisplay(cost, requestCount) };
     })
     .sort((a, b) => b.requestCount - a.requestCount || a.model.localeCompare(b.model));

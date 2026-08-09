@@ -5,7 +5,7 @@
  * 覆盖：totals（tokens 分解 / requestCount / cacheHitRate / cost）、
  * byModel、trend、dimensions；范围：today / 7d / 30d / all × global / project。
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -14,10 +14,15 @@ import { independentQuery } from "../../../scripts/verify-stats.mjs";
 
 const STORE_FILE = join(homedir(), ".pi/agent/token-usage-statistics/records.jsonl");
 
-const records = readFileSync(STORE_FILE, "utf8")
-  .split("\n")
-  .filter((l) => l.trim())
-  .map((l) => JSON.parse(l));
+// 真实数据是开发者本机产物，不是测试环境的一部分：文件缺失时整组跳过（B2），
+// 而不是在顶层 readFileSync 抛 ENOENT 挂掉 CI/新机器。
+const hasRealData = existsSync(STORE_FILE);
+const records = hasRealData
+  ? readFileSync(STORE_FILE, "utf8")
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+  : [];
 
 const DAY_MS = 86_400_000;
 
@@ -83,7 +88,7 @@ const compareResults = (label: string, plugin: ReturnType<typeof queryUsage>, in
   expect(plugin.dimensions, `${label} dimensions`).toEqual(independent.dimensions);
 };
 
-describe("R1: 插件 queryUsage vs 独立参考实现（真实数据）", () => {
+describe.skipIf(!hasRealData)("R1: 插件 queryUsage vs 独立参考实现（真实数据）", () => {
   it("today / 7d / 30d / all × global / project 全部一致", () => {
     const now = Date.now();
     const ranges = ["today", "7d", "30d", "all"] as const;

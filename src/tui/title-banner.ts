@@ -80,6 +80,15 @@ const maxArtWidth = (rows: readonly string[]): number =>
 const paintArt = (rows: readonly string[], w: number, colorize: boolean): string[] =>
   rows.map((line) => paint(centerInWidth(line, w), colorize));
 
+// Art widths are constants — precompute once instead of re-measuring every
+// render (P7).
+const USAGE_STATS_WIDTH = maxArtWidth(ANSI_SHADOW_USAGE_STATISTICS);
+const STATS_WIDTH = maxArtWidth(ANSI_SHADOW_STATISTICS);
+const USAGE_WIDTH = maxArtWidth(ANSI_SHADOW_USAGE);
+const PI_WIDTH = maxArtWidth(ANSI_SHADOW_PI);
+const MIN_STATS_TEXT = displayWidth("π USAGE STATISTICS");
+const FULLWIDTH_ORNAMENT_WIDTH = displayWidth(`✦ ${FULLWIDTH_TITLE} ✦`);
+
 /**
  * Centered banner: ANSI-Shadow **π** above **USAGE STATISTICS**.
  * Falls back to stacked USAGE + Statistics art, then plain / fullwidth labels.
@@ -89,10 +98,6 @@ export function renderTitleBanner(width: number, options: TitleBannerOptions = {
   if (w <= 0) return [];
   const colorize = options.colorize !== false;
 
-  const usageStatsWidth = maxArtWidth(ANSI_SHADOW_USAGE_STATISTICS);
-  const statsWidth = maxArtWidth(ANSI_SHADOW_STATISTICS);
-  const usageWidth = maxArtWidth(ANSI_SHADOW_USAGE);
-  const piWidth = maxArtWidth(ANSI_SHADOW_PI);
   const spacer = centerInWidth("", w);
 
   const withPiArt = (below: string[]): string[] => [
@@ -102,12 +107,12 @@ export function renderTitleBanner(width: number, options: TitleBannerOptions = {
   ];
 
   // Wide: single "USAGE STATISTICS" wordmark under π art.
-  if (w >= usageStatsWidth + 2) {
+  if (w >= USAGE_STATS_WIDTH + 2) {
     return withPiArt(paintArt(ANSI_SHADOW_USAGE_STATISTICS, w, colorize));
   }
 
   // Fits Statistics art: stack USAGE + Statistics under π art.
-  if (w >= statsWidth + 2) {
+  if (w >= STATS_WIDTH + 2) {
     return withPiArt([
       ...paintArt(ANSI_SHADOW_USAGE, w, colorize),
       spacer,
@@ -116,7 +121,7 @@ export function renderTitleBanner(width: number, options: TitleBannerOptions = {
   }
 
   // Mid width: π + USAGE art + plain Statistics label.
-  if (w >= Math.max(usageWidth, piWidth) + 2) {
+  if (w >= Math.max(USAGE_WIDTH, PI_WIDTH) + 2) {
     return withPiArt([
       ...paintArt(ANSI_SHADOW_USAGE, w, colorize),
       spacer,
@@ -125,7 +130,7 @@ export function renderTitleBanner(width: number, options: TitleBannerOptions = {
   }
 
   // Compact: plain π + wordmark (art no longer fits).
-  if (w >= displayWidth("π USAGE STATISTICS") + 2) {
+  if (w >= MIN_STATS_TEXT + 2) {
     return [
       paint(centerInWidth("π", w), colorize),
       spacer,
@@ -133,6 +138,6 @@ export function renderTitleBanner(width: number, options: TitleBannerOptions = {
     ];
   }
 
-  const orn = w >= displayWidth(`✦ ${FULLWIDTH_TITLE} ✦`) ? `✦ ${FULLWIDTH_TITLE} ✦` : FULLWIDTH_TITLE;
+  const orn = w >= FULLWIDTH_ORNAMENT_WIDTH ? `✦ ${FULLWIDTH_TITLE} ✦` : FULLWIDTH_TITLE;
   return [paint(centerInWidth(orn, w), colorize)];
 }

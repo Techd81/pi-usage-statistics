@@ -149,6 +149,100 @@ describe("RecordStore", () => {
     expect(JSON.parse(lines[0]!).recordId).toBe("session-1:e0");
   });
 
+  it("append-only flush: only dirty records are appended; unchanged rows stay untouched (P1)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sessionId: "s1", sourceEntryId: "e1", inputTokens: 10 }));
+    await store.flush();
+    const afterFirst = await readFile(join(dir, RECORDS_FILE), "utf8");
+
+    // A second batch lands: flush must append only the new rows, not rewrite
+    // the whole file (the first record's line survives verbatim).
+    store.upsertRecord(makeRecord({ sessionId: "s2", sourceEntryId: "e2", inputTokens: 20 }));
+    await store.flush();
+    const afterSecond = await readFile(join(dir, RECORDS_FILE), "utf8");
+    expect(afterSecond.startsWith(afterFirst)).toBe(true); // s1:e1 row untouched
+    expect(afterSecond.trim().split("\n")).toHaveLength(2);
+    expect(afterSecond).toContain('"recordId":"s2:e2"');
+  });
+
+  it("append-only flush equivalence: reload + query matches the full-rewrite result (P1)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sessionId: "s1", sourceEntryId: "e1", inputTokens: 10 }));
+    store.upsertRecord(makeRecord({ sessionId: "s1", sourceEntryId: "e1", inputTokens: 5 })); // update same id
+    store.upsertRecord(makeRecord({ sessionId: "s2", sourceEntryId: "e2", inputTokens: 20 }));
+    await store.flush();
+
+    // Duplicate rows for s1:e1 exist on disk (append); a reload must collapse
+    // them to the last version and produce exactly the same numbers.
+    const reloaded = new RecordStore({ storeDir: dir });
+    await reloaded.load();
+    const records = reloaded.snapshot().records;
+    expect(records).toHaveLength(2); // deduped by recordId (B4)
+    const byId = new Map(records.map((r) => [r.recordId, r]));
+    expect(byId.get("s1:e1")!.inputTokens).toBe(5); // last line wins
+    expect(byId.get("s2:e2")!.inputTokens).toBe(20);
+  });
+
+  it("compaction bounds the file: historical duplicate rows are rewritten away when the line count exceeds maxRecords (B1)", async () => {
+    const dir = await makeStoreDir();
+    // Seed the disk file with more rows than maxRecords, including duplicates
+    // (simulating append-only history that outgrew the bound).
+    const r1 = makeRecord({ sessionId: "s1", sourceEntryId: "e1", inputTokens: 1 });
+    const r2 = makeRecord({ sessionId: "s2", sourceEntryId: "e2", inputTokens: 2 });
+    const lines = [JSON.stringify(r1), JSON.stringify(r2), JSON.stringify(r2), JSON.stringify(r1)];
+    await writeStoreFile(dir, RECORDS_FILE, `${lines.join("\n")}\n`);
+
+    const store = new RecordStore({ storeDir: dir, maxRecords: 3 });
+    await store.load();
+    expect(store.snapshot().records).toHaveLength(2); // load dedupes (B4)
+    // A flush with dirty state (new record) must compact the bloated file.
+    store.upsertRecord(makeRecord({ sessionId: "s3", sourceEntryId: "e3", inputTokens: 3 }));
+    await store.flush();
+    const text = await readFile(join(dir, RECORDS_FILE), "utf8");
+    const after = text.trim().split("\n");
+    expect(after).toHaveLength(3); // unique records only — duplicates collapsed
+    const ids = after.map((l) => JSON.parse(l).recordId as string).sort();
+    expect(ids).toEqual(["s1:e1", "s2:e2", "s3:e3"]);
+  });
+
+  it("upsert on a large unique set keeps a single copy and correct values (P2)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    const count = 5_000;
+    for (let i = 0; i < count; i++) {
+      store.upsertRecord(makeRecord({ sessionId: `s${i}`, sourceEntryId: "e1", inputTokens: i }));
+    }
+    expect(store.snapshot().records).toHaveLength(count);
+    // Update an existing id — must replace, not duplicate.
+    store.upsertRecord(makeRecord({ sessionId: "s0", sourceEntryId: "e1", inputTokens: 999 }));
+    expect(store.snapshot().records).toHaveLength(count);
+    const byId = new Map(store.snapshot().records.map((r) => [r.recordId, r]));
+    expect(byId.get("s0:e1")!.inputTokens).toBe(999);
+    await store.flush();
+    const reloaded = new RecordStore({ storeDir: dir });
+    await reloaded.load();
+    expect(reloaded.snapshot().records).toHaveLength(count);
+  });
+
+  it("flush with no changes does not rewrite the records file (P1)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sourceEntryId: "e1", inputTokens: 10 }));
+    await store.flush();
+    const before = await readFile(join(dir, RECORDS_FILE), "utf8");
+    // No mutation since the last flush: a second flush must be a no-op for
+    // the records file (same content, no appended rows).
+    await store.flush();
+    const after = await readFile(join(dir, RECORDS_FILE), "utf8");
+    expect(after).toBe(before);
+  });
+
   it("merges distinct concurrent writers without losing either record", async () => {
     const dir = await makeStoreDir();
     const a = new RecordStore({ storeDir: dir });

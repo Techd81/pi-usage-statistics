@@ -154,7 +154,24 @@ function charWidth(ch: string): number {
   if (code >= 0x2800 && code <= 0x28ff) return 1;
   // Hyphen / en / em dashes: narrow in WT (do not treat as CJK-wide).
   if (code >= 0x2010 && code <= 0x2015) return 1;
-  return code > 0xff ? 2 : 1;
+  // East-Asian wide (conservative subset aligned with east-asian-width W/F):
+  // Hangul Jamo, CJK radicals/symbols/kana/ideographs, Hangul syllables,
+  // CJK compatibility ideographs/forms, vertical forms, fullwidth forms/
+  // signs, and Emoji. Everything else (Greek/Cyrillic U+0100–10FF, …) is a
+  // narrow 1-column glyph — counting µ/Δ/α as 2 would shift the outer frame.
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff)
+  )
+    return 2;
+  return 1;
 }
 
 /**
