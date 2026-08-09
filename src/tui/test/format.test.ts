@@ -241,6 +241,30 @@ describe("formatDateTimeCompact / formatDateRange", () => {
     expect(displayWidth("π USAGE STATISTICS")).toBe(18); // 1 + 1 + 16
   });
 
+  it("matches pi-tui width for dashboard symbols — ⚡ is wide (crash regression)", () => {
+    // Crash fix: ⚡ (U+26A1) is WIDE in pi's measurement. A hand-rolled width
+    // table counted it as 1, so the Cache-hit metric label row rendered one
+    // column past the terminal width and pi exited with
+    // "Rendered line 48 exceeds terminal width (196 > 195)".
+    expect(displayWidth("⚡")).toBe(2);
+    expect(displayWidth("⚡ Cache hit 97.9%")).toBe(18);
+    // Same dashboard icons stay consistent with pi's measurement.
+    expect(displayWidth("📥")).toBe(2);
+    expect(displayWidth("📤")).toBe(2);
+    expect(displayWidth("📖")).toBe(2);
+    expect(displayWidth("💾")).toBe(2);
+    expect(displayWidth("📚")).toBe(2);
+    expect(displayWidth("📨")).toBe(2);
+    expect(displayWidth("💰")).toBe(2);
+    expect(displayWidth("📈")).toBe(2);
+    expect(displayWidth("🤖")).toBe(2);
+    // Narrow glyphs stay narrow in pi's measurement too.
+    expect(displayWidth("⣿")).toBe(1);
+    expect(displayWidth("─")).toBe(1);
+    expect(displayWidth("█")).toBe(1);
+    expect(displayWidth("—")).toBe(1);
+  });
+
   it("ignores emoji variation selectors when measuring width", () => {
     expect(displayWidth("⚡\uFE0F")).toBe(displayWidth("⚡"));
   });

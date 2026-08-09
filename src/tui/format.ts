@@ -3,7 +3,15 @@
  * number/cost/percent conventions (spec web-and-tui.md: shared formatting
  * rules) so both surfaces present identical values. No ANSI codes are
  * generated here — colors are applied by the component after truncation.
+ *
+ * Width measurement delegates to pi-tui's `visibleWidth` — the SAME
+ * measurement pi uses when it validates custom component output
+ * (TuiMainScreen.doRender). Hand-rolled width tables drifted from it
+ * (e.g. ⚡ U+26A1 counted narrow) and made a rendered line exceed the
+ * terminal width, crashing pi with "Rendered line N exceeds terminal width".
+ * Never re-implement character-width logic here.
  */
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { CostDisplay } from "../domain";
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
@@ -123,77 +131,12 @@ export function hitRateBar(rate: number | null, width: number): string {
 }
 
 /**
- * Columns for one character: full-width (CJK / emoji) characters count as 2,
- * block-drawing (U+2580–U+259F) and box-drawing (U+2500–U+257F) as 1,
- * everything else ASCII as 1. Title ANSI-Shadow art relies on █ being narrow;
- * do not place those glyphs in the last column beside the outer frame — use
- * ASCII for edge-adjacent bars/fills instead (see `hitRateBar`).
- *
- * Zero-width: combining marks / variation selectors must not inflate layout
- * (emoji + U+FE0F would otherwise be counted as 4).
- *
- * Narrow punctuation: en/em dashes (U+2010–U+2015) render as 1 column on
- * Windows Terminal; counting them as 2 shifts the outer right `│` inward
- * (seen on the 「使用趋势」 title row that embeds `—`).
- */
-function charWidth(ch: string): number {
-  const code = ch.codePointAt(0) ?? 0;
-  // Combining marks, variation selectors, ZWJ / ZWNJ — zero display columns.
-  if (
-    (code >= 0x300 && code <= 0x36f) ||
-    (code >= 0xfe00 && code <= 0xfe0f) ||
-    code === 0x200d ||
-    code === 0x200c ||
-    code === 0xfeff
-  ) {
-    return 0;
-  }
-  if (code >= 0x2500 && code <= 0x257f) return 1; // box drawing ┌─┐│└┘ etc.
-  if (code >= 0x2580 && code <= 0x259f) return 1; // ▁▂▃▄▅▆▇█ are narrow in layout math
-  // Braille (progress bar): 1 column on WT / most terminals — not CJK-wide.
-  if (code >= 0x2800 && code <= 0x28ff) return 1;
-  // Hyphen / en / em dashes: narrow in WT (do not treat as CJK-wide).
-  if (code >= 0x2010 && code <= 0x2015) return 1;
-  // East-Asian wide (conservative subset aligned with east-asian-width W/F):
-  // Hangul Jamo, CJK radicals/symbols/kana/ideographs, Hangul syllables,
-  // CJK compatibility ideographs/forms, vertical forms, fullwidth forms/
-  // signs, and Emoji. Everything else (Greek/Cyrillic U+0100–10FF, …) is a
-  // narrow 1-column glyph — counting µ/Δ/α as 2 would shift the outer frame.
-  if (
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe10 && code <= 0xfe19) ||
-    (code >= 0xfe30 && code <= 0xfe6f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x1f300 && code <= 0x1faff)
-  )
-    return 2;
-  return 1;
-}
-
-/**
- * Visible display width: full-width (CJK) characters count as 2 columns,
- * everything else as 1. ANSI escape sequences are skipped entirely, so this
- * stays correct for strings that were already colored.
+ * Visible display width in terminal columns — delegates to pi-tui's
+ * `visibleWidth` so every measurement matches pi's own line validation
+ * exactly (grapheme clusters, emoji, zero-width marks, ANSI stripping, tabs).
  */
 export function displayWidth(text: string): number {
-  let width = 0;
-  let inEscape = false;
-  for (const ch of text) {
-    if (ch === "\u001b") {
-      inEscape = true;
-      continue;
-    }
-    if (inEscape) {
-      if (ch === "m") inEscape = false; // ANSI SGR ends with 'm'
-      continue;
-    }
-    width += charWidth(ch);
-  }
-  return width;
+  return visibleWidth(text);
 }
 
 /**
@@ -265,7 +208,7 @@ export function truncateToWidth(text: string, width: number): string {
       i = end + 1;
       continue;
     }
-    const w = charWidth(ch);
+    const w = displayWidth(ch);
     if (used + w > width) {
       // Keep any SGR sequences from the dropped tail (resets, color changes)
       // so the terminal state after this line matches the full text.
