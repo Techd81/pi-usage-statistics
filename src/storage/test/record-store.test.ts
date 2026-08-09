@@ -1,13 +1,29 @@
 /**
  * RecordStore unit tests: atomic persistence, truncated-tail tolerance,
- * schema-versioned rebuild, compaction, and recordId upsert semantics.
+ * schema-versioned rebuild, compaction, recordId upsert semantics, and
+ * Windows-style rename-lock recovery (retry + overwrite fallback).
  */
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecordStore, RECORDS_FILE, INDEX_FILE } from "../record-store";
 import { makeRecord, writeStoreFile } from "./helpers";
+
+// `node:fs/promises` is a frozen ESM namespace: vi.spyOn cannot patch it, so
+// mock the module and delegate to the real implementation by default. The
+// real `rename` is stashed via vi.hoisted so tests can restore it afterwards.
+const renameReal = vi.hoisted(() => ({ impl: null as (typeof import("node:fs/promises"))["rename"] | null }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  renameReal.impl = actual.rename;
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
+
+/** A Windows-style sharing-violation error: rename-over a locked target. */
+const renameEperm = (): Error =>
+  Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
 
 const tempDirs: string[] = [];
 
@@ -17,8 +33,12 @@ async function makeStoreDir(): Promise<string> {
   return dir;
 }
 
-afterEach(async () => {
-  // nothing to clean synchronously; tmp dirs are OS-managed
+afterEach(() => {
+  // Restore the real rename implementation and clear call history so mocked
+  // lock failures never leak into other tests. (tmp dirs are OS-managed.)
+  const mock = vi.mocked(rename);
+  if (renameReal.impl) mock.mockImplementation(renameReal.impl);
+  mock.mockClear();
 });
 
 describe("RecordStore", () => {
@@ -288,6 +308,36 @@ describe("RecordStore", () => {
     expect(store.isDirty).toBe(true);
     await rm(lockPath, { recursive: true });
     await expect(store.flush()).resolves.toBeUndefined();
+    expect(store.isDirty).toBe(false);
+  });
+
+  it("retries rename when the target is briefly locked, then succeeds (Windows EPERM)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sourceEntryId: "locked", inputTokens: 7 }));
+    // Two lock-contention failures, then the real rename succeeds.
+    vi.mocked(rename)
+      .mockRejectedValueOnce(renameEperm())
+      .mockRejectedValueOnce(renameEperm());
+    await expect(store.flush()).resolves.toBeUndefined();
+    expect(vi.mocked(rename).mock.calls.length).toBeGreaterThanOrEqual(3); // 2 failures + retry success
+    const text = await readFile(join(dir, RECORDS_FILE), "utf8");
+    expect(text).toContain('"sourceEntryId":"locked"');
+    expect(store.isDirty).toBe(false);
+  });
+
+  it("falls back to a direct overwrite when the target stays locked (Windows EPERM)", async () => {
+    const dir = await makeStoreDir();
+    const store = new RecordStore({ storeDir: dir });
+    await store.load();
+    store.upsertRecord(makeRecord({ sourceEntryId: "stuck", inputTokens: 8 }));
+    // The target never unlocks within the retry window: flush must still
+    // persist via the complete-but-non-atomic overwrite fallback.
+    vi.mocked(rename).mockRejectedValue(renameEperm());
+    await expect(store.flush()).resolves.toBeUndefined();
+    const text = await readFile(join(dir, RECORDS_FILE), "utf8");
+    expect(text).toContain('"sourceEntryId":"stuck"');
     expect(store.isDirty).toBe(false);
   });
 

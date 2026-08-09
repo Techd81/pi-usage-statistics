@@ -34,6 +34,21 @@ export type StoreSnapshot = {
   compactedCount: number;
 };
 
+/** Error codes for Windows sharing violations / antivirus locks that a short
+ * retry can outlast (Node maps ERROR_ACCESS_DENIED → EPERM and
+ * ERROR_SHARING_VIOLATION → EBUSY/EACCES). */
+const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY", "EAGAIN", "ENOTEMPTY"]);
+
+/** Max rename attempts before falling back to a direct overwrite. */
+const RENAME_RETRY_COUNT = 8;
+/** Delay between rename attempts (total retry window ≈ 200ms). */
+const RENAME_RETRY_DELAY_MS = 25;
+
+const isRetryableRenameError = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return typeof code === "string" && RETRYABLE_RENAME_CODES.has(code);
+};
+
 /**
  * Atomic write: write to a temp file in the same directory, then rename over
  * the target. A crash mid-write leaves the previous file intact.
@@ -44,10 +59,40 @@ async function atomicWrite(filePath: string, contents: string): Promise<void> {
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
     await writeFile(tempPath, contents, "utf8");
-    await rename(tempPath, filePath);
+    await replaceFile(tempPath, filePath, contents);
   } finally {
     await rm(tempPath, { force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * Replace `targetPath` with `tempPath` atomically (rename). Windows rejects
+ * rename-over while another process holds the target open — Node opens files
+ * without FILE_SHARE_DELETE, so a concurrent reader (a second Pi window, the
+ * standalone viewer, an editor, or antivirus real-time scan) can block it for
+ * tens of milliseconds. Retry briefly; if the target stays locked, fall back
+ * to a complete-but-non-atomic overwrite. The JSONL reader tolerates a
+ * truncated final line and the next flush rewrites the file, so no data is
+ * lost; only the crash-atomicity guarantee is surrendered on that rare path.
+ */
+async function replaceFile(tempPath: string, targetPath: string, contents: string): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= RENAME_RETRY_COUNT; attempt += 1) {
+    try {
+      await rename(tempPath, targetPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableRenameError(error) || attempt >= RENAME_RETRY_COUNT) break;
+      await delay(RENAME_RETRY_DELAY_MS);
+    }
+  }
+  // Rare fallback: the target stayed locked for the whole retry window.
+  // Complete but not atomic — a crash mid-write leaves a truncated tail that
+  // load() tolerates and the next flush repairs.
+  await writeFile(targetPath, contents, "utf8").catch(() => {
+    throw lastError; // even the overwrite failed: surface the lock error
+  });
 }
 
 const LOCK_RETRY_COUNT = 40;
