@@ -46,7 +46,19 @@
 
 任选一种方式安装后，**重启 Pi**（扩展在 session 启动时加载）。可用 `pi list` 查看已装扩展，`pi config` 启用 / 禁用。
 
-### 推荐：从 GitHub 安装
+### 推荐：从 npm 安装
+
+```bash
+pi install npm:pi-token-usage-statistics
+```
+
+需要独立查看器 `pi-usage`（终端快速入口）时，再全局安装 CLI（可选）：
+
+```bash
+npm install -g pi-token-usage-statistics
+```
+
+### 从 GitHub 安装
 
 ```bash
 pi install git:github.com/Techd81/pi-usage-statistics
@@ -62,13 +74,7 @@ pi install D:/pi-usage-statistics
 pi install /path/to/pi-usage-statistics
 ```
 
-### npm（发布后可用）
-
-```bash
-pi install npm:pi-token-usage-statistics
-```
-
-> 包名是 `pi-token-usage-statistics`；仓库名是 `pi-usage-statistics`。若 npm 尚未发布，请使用上方 Git / 本地路径安装。
+> 包名是 `pi-token-usage-statistics`（npm registry 已发布 0.1.0）；仓库名是 `pi-usage-statistics`。
 
 安装成功后，在任意 Pi 会话中输入：
 
@@ -232,6 +238,7 @@ npm install
 npm test           # 完整测试套件（vitest）
 npm run typecheck  # 类型检查
 npm pack --dry-run # 预览发包内容
+npm publish        # 发布到 npm registry（需已登录并通过 2FA）
 ```
 
 ## Troubleshooting / 排查
