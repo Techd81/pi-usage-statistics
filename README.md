@@ -10,6 +10,8 @@
 
 在 Pi 终端内查看 token 使用统计的扩展：按 provider / 模型统计实际消耗，区分 input / output / cache 读写，计算缓存命中率与成本，支持项目级 / 全局级范围切换与多系列趋势曲线。**纯本地运行，无浏览器、无 HTTP 服务器、无任何远程上报。**
 
+本项目链接认可 [LINUX DO](https://linux.do) 社区。
+
 <p align="center">
   <img src="images/image1.png" alt="仪表盘主视图：总览指标与使用趋势" width="900" />
 </p>
