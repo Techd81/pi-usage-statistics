@@ -6,9 +6,9 @@
 
 # Pi Token Usage Statistics
 
-> Track token usage, cost, and cache-hit statistics for the [Pi coding agent](https://github.com/earendil-works/pi) — with a native TUI dashboard.
+> Track token usage, cost, and cache-hit statistics for the [Pi coding agent](https://github.com/earendil-works/pi) — with interactive TUI and Pi Web-compatible dashboards.
 
-在 Pi 终端内查看 token 使用统计的扩展：按 provider / 模型统计实际消耗，区分 input / output / cache 读写，计算缓存命中率与成本，支持项目级 / 全局级范围切换与多系列趋势曲线。**纯本地运行，无浏览器、无 HTTP 服务器、无任何远程上报。**
+在 Pi 终端或 [Pi Web](https://github.com/agegr/pi-web) 中查看 token 使用统计：按 provider / 模型统计实际消耗，区分 input / output / cache 读写，计算缓存命中率与成本，支持项目级 / 全局级范围切换与多系列趋势曲线。**纯本地运行，不启动额外浏览器、不创建独立 HTTP 服务、无任何远程上报。**
 
 本项目链接认可 [LINUX DO](https://linux.do) 社区。
 
@@ -24,14 +24,15 @@
 
 - **Accurate collection** — 每条完成的 assistant 回复只计一次；不订阅 streaming 增量，避免双计
 - **Aggregates across all local Pi sessions** — 总 tokens、请求数、成本、input / output / cache-create / cache-hit 与命中率
-- **Native TUI dashboard** — `/pi-usage-statistics` 打开嵌入式交互界面
+- **TUI + Pi Web dashboard** — `/pi-usage-statistics` 在 Pi 终端和 Pi Web 中打开同一个交互式统计面板
 
   | Key / 按键 | Action / 作用 |
-  |---|---|
+  | --- | --- |
   | `p` / `g` | 切换项目 / 全局范围 |
   | `m` | 切换主视图 ↔ 按模型统计表 |
   | `t` | 循环时间范围：当天 → 1d → 7d → 14d → 30d → 1year → 全部 |
   | `Esc` | 返回（模型表 → 主视图）或关闭 |
+  | `Ctrl+C` / Pi Web「关闭」 | 直接关闭面板 |
 
 - **Standalone viewer / 独立查看器** — 安装本包后可直接运行 `pi-usage`（或 PowerShell wrapper `pi usage`）：不启动 pi 会话、不产生会话记录，htop 式打开同一面板（交互与上表一致），`Esc` 退出即回到终端（详见 [Terminal Quick Access](#terminal-quick-access--终端快速入口)）
 
@@ -42,11 +43,12 @@
 ## Requirements / 环境要求
 
 - [Pi coding agent](https://github.com/earendil-works/pi) `>= 0.84.0`
+- [Pi Web](https://github.com/agegr/pi-web) `>= 0.8.8`（仅使用 Web UI 时需要）
 - Node.js `>= 22.19.0`
 
 ## Installation / 安装
 
-任选一种方式安装后，**重启 Pi**（扩展在 session 启动时加载）。可用 `pi list` 查看已装扩展，`pi config` 启用 / 禁用。
+任选一种方式安装。Pi 终端需要重启会话；Pi Web 可在插件面板安装后重载当前会话，或重启 `pi-web`。可用 `pi list` 查看已装扩展，`pi config` 启用 / 禁用。
 
 ### 推荐：从 npm 安装
 
@@ -80,18 +82,28 @@ pi install /path/to/pi-usage-statistics
 
 安装成功后，在任意 Pi 会话中输入：
 
-```
+```text
 /pi-usage-statistics
 ```
 
 即可打开仪表盘。
 
+### Pi Web
+
+Pi Web `0.8.8+` 会在 RPC 会话中加载同一扩展，并把 `ctx.ui.custom()` 组件桥接为浏览器内的交互式面板。安装或启用插件后，在 Pi Web 会话输入相同命令即可：
+
+```text
+/pi-usage-statistics
+```
+
+面板支持 `p` / `g` / `m` / `t` / `Esc`，也可点击右上角「关闭」。Web 模式使用独立的 ASCII-safe 摘要、模型表和趋势图，避免 Emoji、Unicode 框线与浏览器字体度量差异造成列错位；终端 TUI 继续保留完整艺术字与多系列图表。统计、去重、价格计算、持久化和实时刷新全部复用插件现有实现；无需修改 Pi Web、无需额外端口，也不会启动第二个 Web 服务。
+
 ## Usage / 使用
 
-在 Pi 会话中：
+在 Pi 终端或 Pi Web 会话中：
 
-```
-/pi-usage-statistics           # 打开 TUI（默认全局范围）
+```text
+/pi-usage-statistics           # 打开交互式面板（默认全局范围）
 /pi-usage-statistics project   # 仅当前工作目录下的会话
 /pi-usage-statistics global    # 全部本地会话
 /pi-usage-statistics refresh   # 强制重扫 session 文件并打印摘要
@@ -246,7 +258,7 @@ npm publish        # 发布到 npm registry（需已登录并通过 2FA）
 ## Troubleshooting / 排查
 
 | 现象 | 处理 |
-|---|---|
+| --- | --- |
 | 命令找不到 | 确认已 `pi install` 且重启 Pi；`pi list` 中扩展已启用 |
 | 数据为空 | 先正常对话产生 assistant 回复，或执行 `/pi-usage-statistics refresh` |
 | 成本显示 `--` | 模型不在价表中；可配置 `pricing.json`，或依赖 Pi 写入的 recorded cost |

@@ -2,15 +2,16 @@
  * `/pi-usage-statistics` command implementation (design §6).
  *
  * Arguments:
- * - (none)   -> default scope `global`; TUI mode opens the interactive
- *               embedded dashboard, other modes print a text summary;
+ * - (none)   -> default scope `global`; TUI and compatible RPC hosts (such
+ *               as Pi Web) open the interactive embedded dashboard, while
+ *               non-interactive modes print a text summary;
  * - `project`-> scope `project` (records of the current working directory);
  * - `global` -> scope `global` (all locally stored sessions).
  *
- * Mode guards: `ctx.ui.custom()` runs only in `tui` mode; TUI/rpc modes
- * receive notifications, print mode writes plain text to stdout, json mode
- * stays silent so the JSON event stream is never corrupted. All failures are
- * reported non-fatally.
+ * Mode guards: `ctx.ui.custom()` runs in `tui` and `rpc` modes. Pi Web
+ * provides a headless custom-component bridge for RPC sessions; print mode
+ * writes plain text to stdout and json mode stays silent so the JSON event
+ * stream is never corrupted. All failures are reported non-fatally.
  */
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { UsageFilters, UsageQueryResult } from "../domain";
@@ -119,8 +120,12 @@ export async function runUsageStatsCommand(
     const scope: Scope = arg === "project" ? "project" : "global";
 
     if (ctx.mode === "tui") {
-      await showUsageOverlay(deps, ctx, scope);
+      await showUsageDashboard(deps, ctx, scope);
       return;
+    }
+    if (ctx.mode === "rpc") {
+      const displayed = await showUsageDashboard(deps, ctx, scope);
+      if (displayed) return;
     }
 
     const result: UsageQueryResult = deps.store.query(filtersForScope(scope, ctx));
@@ -132,21 +137,34 @@ export async function runUsageStatsCommand(
 }
 
 /**
- * TUI-only interactive embedded dashboard. Lazy-imports the dashboard module
- * (pi-tui must never load in non-TUI modes) and guards every TUI API by
- * `ctx.mode === "tui"`. Failures are reported non-fatally.
+ * Interactive dashboard for Pi's TUI and RPC hosts that implement the custom
+ * component bridge (notably Pi Web >= 0.8.8). The dashboard module is imported
+ * lazily so print/json modes never load pi-tui. Returning `false` means the
+ * host used the standard RPC no-op implementation and the caller should fall
+ * back to the compact text summary. Failures are non-fatal.
  */
-async function showUsageOverlay(deps: CommandDependencies, ctx: ExtensionCommandContext, scope: Scope): Promise<void> {
+async function showUsageDashboard(
+  deps: CommandDependencies,
+  ctx: ExtensionCommandContext,
+  scope: Scope,
+): Promise<boolean> {
   try {
     // Multi-window: reload the durable file first so the freshly opened
     // dashboard already includes records written by other pi processes.
     await deps.store.reloadFromDisk();
     const { makeOverlayFactory } = await import("../tui/dashboard");
     const cwd = projectCwd(ctx);
-    const overlayDeps: OverlayDeps = { store: deps.store, projectCwd: cwd, initialScope: scope };
+    const overlayDeps: OverlayDeps = {
+      store: deps.store,
+      projectCwd: cwd,
+      initialScope: scope,
+      renderTarget: ctx.mode === "rpc" ? "web" : "terminal",
+    };
     if (deps.subscribeLive) overlayDeps.subscribeLive = deps.subscribeLive;
-    await ctx.ui.custom(makeOverlayFactory(overlayDeps));
+    const result = await ctx.ui.custom<null>(makeOverlayFactory(overlayDeps));
+    return ctx.mode === "tui" || result !== undefined;
   } catch (error) {
-    presentError(ctx, "tui", error);
+    presentError(ctx, "dashboard", error);
+    return false;
   }
 }
