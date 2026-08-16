@@ -78,7 +78,7 @@ pi install D:/pi-usage-statistics
 pi install /path/to/pi-usage-statistics
 ```
 
-> 包名是 `pi-token-usage-statistics`（npm registry 已发布 0.1.0）；仓库名是 `pi-usage-statistics`。
+> 包名是 `pi-token-usage-statistics`（npm registry 已发布 0.2.0）；仓库名是 `pi-usage-statistics`。
 
 安装成功后，在任意 Pi 会话中输入：
 
