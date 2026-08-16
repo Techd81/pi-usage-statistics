@@ -7,7 +7,7 @@
  *   current cwd).
  * - Keys: `p`/`g` scope switch, `m` models-view toggle, `t` time-range
  *   cycle (当天 → 1d → 7d → 14d → 30d → 1year → 全部), `Esc` back (models → main first,
- *   then close).
+ *   then close), and `Ctrl+C` close (used by Pi Web's panel close button).
  * - Dual views: the default main view shows a hero Total tokens + Requests/
  *   Cost summary (with icons), five metric slots, and the Usage trend chart
  *   below; `[m]` switches to a full-width five-column per-model table
@@ -40,6 +40,7 @@ import {
   hitRateBar,
   scopeLabel,
   timeRangeLabel,
+  trendBar,
   truncateToWidth,
 } from "./format";
 import { renderTrendChart, trimTrendEmptyEdges } from "./trend-chart";
@@ -53,6 +54,9 @@ export type TimeRange = "today" | "1d" | "7d" | "14d" | "30d" | "1y" | "all";
 
 /** Presentation view: hero+metrics+trend, or the per-model table. */
 export type ViewMode = "main" | "models";
+
+/** Rendering profile: full terminal art or browser-safe monospaced text. */
+export type DashboardRenderTarget = "terminal" | "web";
 
 /** Color functions consumed by the component; injectable for tests. */
 export type DashboardTheme = {
@@ -75,6 +79,8 @@ export type OverlayDeps = {
   store: UsageStore;
   projectCwd: string;
   initialScope?: Scope;
+  /** Browser RPC uses ASCII-safe rendering; terminal remains the default. */
+  renderTarget?: DashboardRenderTarget;
   /**
    * Live-update source: register a listener invoked when a new usage record
    * arrives (message_end). Returns an unsubscribe function. When absent the
@@ -164,6 +170,60 @@ const ICONS = {
 const iconFor = (pair: IconPair, wide: boolean): string => (wide ? pair.emoji : pair.symbol);
 
 const withIcon = (pair: IconPair, label: string, wide: boolean): string => `${iconFor(pair, wide)} ${label}`;
+
+/** Browser custom panels render text with DOM font metrics, not terminal cells. */
+const asciiOnly = (text: string): string =>
+  Array.from(text, (char) => {
+    const codePoint = char.codePointAt(0) ?? 0;
+    return codePoint >= 0x20 && codePoint <= 0x7e ? char : "?";
+  }).join("");
+
+const clipAscii = (text: string, width: number): string => {
+  if (width <= 0) return "";
+  const value = asciiOnly(text);
+  if (value.length <= width) return value;
+  if (width <= 3) return value.slice(0, width);
+  return `${value.slice(0, width - 3)}...`;
+};
+
+type AsciiAlign = "left" | "right" | "center";
+
+const alignAscii = (text: string, width: number, align: AsciiAlign = "left"): string => {
+  const value = clipAscii(text, width);
+  const padding = Math.max(0, width - value.length);
+  if (align === "right") return `${" ".repeat(padding)}${value}`;
+  if (align === "center") {
+    const left = Math.floor(padding / 2);
+    return `${" ".repeat(left)}${value}${" ".repeat(padding - left)}`;
+  }
+  return `${value}${" ".repeat(padding)}`;
+};
+
+const asciiProgressBar = (rate: number | null, width: number): string => {
+  const w = Math.max(0, Math.floor(width));
+  if (w === 0) return "";
+  if (rate === null) return "-".repeat(w);
+  const clamped = Math.max(0, Math.min(100, rate));
+  const filled = Math.round((clamped / 100) * w);
+  return `${"#".repeat(filled)}${"-".repeat(w - filled)}`;
+};
+
+/** Downsample a long trend to the browser text width while preserving peaks. */
+const sampleSeries = (values: readonly number[], maxPoints: number): number[] => {
+  const limit = Math.max(1, Math.floor(maxPoints));
+  if (values.length <= limit) return [...values];
+  const bucketSize = Math.ceil(values.length / limit);
+  const sampled: number[] = [];
+  for (let start = 0; start < values.length; start += bucketSize) {
+    let peak = 0;
+    const end = Math.min(values.length, start + bucketSize);
+    for (let index = start; index < end; index += 1) {
+      peak = Math.max(peak, values[index] ?? 0);
+    }
+    sampled.push(peak);
+  }
+  return sampled;
+};
 
 /** Debounce window for live updates: bursts of message_end coalesce into one refresh. */
 export const LIVE_REFRESH_DEBOUNCE_MS = 300;
@@ -288,6 +348,16 @@ export class UsageDashboardComponent {
         this.requestRender();
         break;
     }
+    // Pi Web's custom-panel close button sends the terminal Ctrl+C byte.
+    // Close directly from either view; Esc retains models → main → close.
+    if (data === "\x03") {
+      if (!this.completed) {
+        this.completed = true;
+        this.dispose();
+        this.onDone();
+      }
+      return;
+    }
     // Esc arrives as raw terminal bytes whose encoding depends on the
     // terminal: legacy `\x1b`, Kitty-protocol CSI-u `\x1b[27u`, or xterm
     // modifyOtherKeys `\x1b[27;1;27~`. matchesKey() covers all forms (and
@@ -310,6 +380,7 @@ export class UsageDashboardComponent {
 
   render(width: number): string[] {
     const w = Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
+    if (this.deps.renderTarget === "web") return this.renderWeb(w);
     const framed = w >= FRAME_MIN_WIDTH;
     // ││ = 2 cols; frameLines also keeps FRAME_RIGHT_GUTTER ASCII spaces
     // before the right border to absorb ambiguous-width surprises.
@@ -339,6 +410,138 @@ export class UsageDashboardComponent {
     lines.push(this.theme.muted(centerInWidth(truncateToWidth(this.statusLine(), inner), inner)));
     const capped = lines.map((line) => truncateToWidth(line, inner));
     return framed ? frameLines(capped, w) : capped;
+  }
+
+  /** Browser-safe layout: ASCII only, no terminal-cell width assumptions. */
+  private renderWeb(width: number): string[] {
+    const w = Math.max(1, width);
+    const lines: string[] = [];
+
+    if (this.state.kind === "loading") {
+      lines.push("Loading usage data...");
+    } else if (this.state.kind === "error") {
+      lines.push("Usage data unavailable", this.state.message);
+    } else if (this.viewMode === "models") {
+      this.renderWebModels(lines, this.state.result, w);
+    } else {
+      this.renderWebMain(lines, this.state.result, w);
+    }
+
+    lines.push("");
+    lines.push(
+      `Scope: ${this.scope === "project" ? "PROJECT" : "GLOBAL"} | Time: ${this.timeRange === "all" ? "ALL" : this.timeRange.toUpperCase()}`,
+    );
+    if (this.scope === "project" && this.deps.projectCwd !== "") {
+      lines.push(`Project: ${this.deps.projectCwd}`);
+    }
+    lines.push("[p] Project  [g] Global  [m] Models  [t] Time  [Esc] Back");
+    return lines.map((line) => clipAscii(line, w));
+  }
+
+  private renderWebMain(lines: string[], result: UsageQueryResult, width: number): void {
+    const totals = result.totals;
+    lines.push("USAGE STATISTICS", "================", "");
+    if (totals.requestCount === 0 && totals.totalTokens === 0) {
+      lines.push("No usage data in the selected range.", "");
+    }
+    const metric = (label: string, value: string): string => `${alignAscii(label, 14)} ${value}`;
+    lines.push(
+      metric("Total tokens", formatTokens(totals.totalTokens)),
+      metric("Requests", formatTokens(totals.requestCount)),
+      metric("Cost", formatCost(totals.cost)),
+      "",
+      metric("Input", formatTokens(totals.inputTokens)),
+      metric("Output", formatTokens(totals.outputTokens)),
+      metric("Cache write", formatTokens(totals.cacheWriteTokens)),
+      metric("Cache read", formatTokens(totals.cacheReadTokens)),
+    );
+    const hitBarWidth = Math.max(4, Math.min(28, width - 30));
+    lines.push(
+      `${alignAscii("Cache hit", 14)} ${alignAscii(formatHitRate(totals.cacheHitRate), 7)} [${asciiProgressBar(totals.cacheHitRate, hitBarWidth)}]`,
+      "",
+    );
+    this.renderWebTrend(lines, result, width);
+  }
+
+  private renderWebModels(lines: string[], result: UsageQueryResult, width: number): void {
+    lines.push("MODELS", "======", "");
+    if (result.byModel.length === 0) {
+      lines.push("No models in the selected range.");
+      return;
+    }
+
+    if (width < 68) {
+      for (const entry of result.byModel) {
+        lines.push(
+          `Model: ${entry.model}`,
+          `  Requests: ${formatTokens(entry.requestCount)}  Tokens: ${formatTokens(entry.totalTokens)}`,
+          `  Total cost: ${formatCost(entry.cost)}  Avg cost: ${formatCost(entry.avgCost)}`,
+          "",
+        );
+      }
+      return;
+    }
+
+    const separator = " | ";
+    const requestWidth = 8;
+    const tokenWidth = 14;
+    const totalCostWidth = 12;
+    const avgCostWidth = 10;
+    const nameWidth =
+      width - (separator.length * 4 + requestWidth + tokenWidth + totalCostWidth + avgCostWidth);
+    const row = (model: string, requests: string, tokens: string, totalCost: string, avgCost: string): string =>
+      alignAscii(model, nameWidth) +
+      separator +
+      alignAscii(requests, requestWidth, "right") +
+      separator +
+      alignAscii(tokens, tokenWidth, "right") +
+      separator +
+      alignAscii(totalCost, totalCostWidth, "right") +
+      separator +
+      alignAscii(avgCost, avgCostWidth, "right");
+
+    lines.push(
+      row("Model", "Requests", "Tokens", "Total cost", "Avg cost"),
+      `${"-".repeat(nameWidth)}-+-${"-".repeat(requestWidth)}-+-${"-".repeat(tokenWidth)}-+-${"-".repeat(totalCostWidth)}-+-${"-".repeat(avgCostWidth)}`,
+    );
+    for (const entry of result.byModel) {
+      lines.push(
+        row(
+          entry.model,
+          formatTokens(entry.requestCount),
+          formatTokens(entry.totalTokens),
+          formatCost(entry.cost),
+          formatCost(entry.avgCost),
+        ),
+      );
+    }
+  }
+
+  private renderWebTrend(lines: string[], result: UsageQueryResult, width: number): void {
+    const isAllTime = !(result.filters.fromMs > 0);
+    const trend = isAllTime ? trimTrendEmptyEdges(result.trend) : result.trend;
+    if (trend.length === 0) {
+      lines.push("TREND", "-----", "No trend data.");
+      return;
+    }
+    const fromMs = isAllTime ? (trend[0]?.startMs ?? 0) : result.filters.fromMs;
+    const toMs =
+      result.filters.toMs < Number.MAX_SAFE_INTEGER
+        ? result.filters.toMs
+        : (trend.at(-1)?.startMs ?? result.filters.toMs);
+    lines.push(`TREND  ${formatDateRange(fromMs, toMs)}`, "-----");
+    const chartWidth = Math.max(4, width - 15);
+    const series: readonly [string, number[]][] = [
+      ["Input", trend.map((point) => point.inputTokens)],
+      ["Output", trend.map((point) => point.outputTokens)],
+      ["Cache write", trend.map((point) => point.cacheWriteTokens)],
+      ["Cache read", trend.map((point) => point.cacheReadTokens)],
+      ["Cost", trend.map((point) => point.cost.amount ?? 0)],
+    ];
+    for (const [label, values] of series) {
+      const sampled = sampleSeries(values, chartWidth);
+      lines.push(`${alignAscii(label, 13)} ${trendBar(sampled, chartWidth)}`);
+    }
   }
 
   /** Default main view: title banner + hero + metric slots + usage trend. */

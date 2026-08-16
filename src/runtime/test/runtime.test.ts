@@ -28,7 +28,7 @@ import { DEFAULT_BUCKET_MS } from "../../domain";
 import usageStatsExtension from "../../extension";
 import { UsageStore } from "../../storage";
 import { makeRecord } from "../../storage/test/helpers";
-import { LIVE_REFRESH_DEBOUNCE_MS, UsageDashboardComponent } from "../../tui/dashboard";
+import { LIVE_REFRESH_DEBOUNCE_MS, type UsageDashboardComponent } from "../../tui/dashboard";
 
 // --- Mock the Pi runtime module (isolation for store dir + scanner) --------
 
@@ -429,7 +429,7 @@ describe("/pi-usage-statistics command", () => {
     }
   });
 
-  it("TC5: TUI mode opens the embedded custom UI; print mode never does", async () => {
+  it("TC5: TUI and Pi Web RPC open the custom UI; generic RPC falls back to text", async () => {
     const store = await makeStore();
     const { api, commands } = makeHarness();
     usageStatsExtension(api, { store, scanDebounceMs: 1_000_000 });
@@ -439,11 +439,56 @@ describe("/pi-usage-statistics command", () => {
     await handler("", printCtx);
     expect(vi.mocked(printCtx.ui.custom)).not.toHaveBeenCalled();
 
-    // Embedded custom UI is the default; no floating overlay options are passed.
     const tuiCtx = makeCtx({ mode: "tui" });
+    (tuiCtx.ui as { custom: unknown }).custom = vi.fn(
+      async (
+        factory: (
+          tui: unknown,
+          theme: unknown,
+          keybindings: unknown,
+          done: (value: null) => void,
+        ) => UsageDashboardComponent,
+      ) => {
+        const component = factory({ requestRender: () => {} }, null, {}, () => {});
+        component.dispose();
+      },
+    );
     await handler("", tuiCtx);
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(tuiCtx.ui.custom)).toHaveBeenCalledWith(expect.any(Function));
+
+    const rpcCtx = makeCtx({ mode: "rpc" });
+    let rpcComponent: UsageDashboardComponent | undefined;
+    (rpcCtx.ui as { custom: unknown }).custom = vi.fn(
+      async (
+        factory: (
+          tui: unknown,
+          theme: unknown,
+          keybindings: unknown,
+          done: (value: null) => void,
+        ) => UsageDashboardComponent,
+      ) => {
+        rpcComponent = factory({ requestRender: () => {} }, null, {}, () => {});
+        return null;
+      },
+    );
+    await handler("", rpcCtx);
+    expect(vi.mocked(rpcCtx.ui.custom)).toHaveBeenCalledTimes(1);
+    expect(rpcComponent).toBeDefined();
+    const webLines = rpcComponent!.render(92);
+    expect(webLines.every((line) => /^[\x20-\x7e]*$/.test(line))).toBe(true);
+    expect(webLines.every((line) => line.length <= 92)).toBe(true);
+    expect(webLines.join("\n")).toContain("USAGE STATISTICS");
+    rpcComponent!.dispose();
+
+    const genericRpcCtx = makeCtx({ mode: "rpc" });
+    (genericRpcCtx.ui as { custom: unknown }).custom = vi.fn(async () => undefined);
+    await handler("", genericRpcCtx);
+    expect(vi.mocked(genericRpcCtx.ui.custom)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(genericRpcCtx.ui.notify)).toHaveBeenCalledWith(
+      expect.stringContaining("requests:"),
+      "info",
+    );
   });
 
   it("TC6: an open dashboard hot-updates on message_end (debounced) and unsubscribes on close", async () => {

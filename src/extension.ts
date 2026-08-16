@@ -10,7 +10,8 @@
  * - `model_select`    -> no-op (query dimensions are derived per query);
  * - `session_shutdown`-> stop timers, flush pending writes.
  *
- * Command: `/pi-usage-statistics` (TUI-only product; no web surface).
+ * Command: `/pi-usage-statistics` (interactive TUI and Pi Web-compatible
+ * custom dashboard).
  *
  * Error pathway: every async handler is wrapped; failures are reported via
  * `ctx.ui.notify`/stdout and logged, never rethrown into Pi
@@ -149,7 +150,7 @@ export default function usageStatsExtension(pi: ExtensionAPI, options: UsageStat
 
   pi.registerCommand("pi-usage-statistics", {
     description:
-      "Token usage statistics (TUI). Optional argument: project | global (scope). No argument defaults to global.",
+      "Token usage statistics dashboard (TUI and Pi Web). Optional argument: project | global (scope). No argument defaults to global.",
     handler: (args, ctx) => runUsageStatsCommand({ store, subscribeLive }, args, ctx),
   });
 }

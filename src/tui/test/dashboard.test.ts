@@ -109,10 +109,10 @@ describe("UsageDashboardComponent.render", () => {
     // Trend title + legend are centered (leading spaces before 使用趋势 / Cost).
     const trendLine = lines.find((line) => line.includes("使用趋势"));
     expect(trendLine).toBeDefined();
-    expect(trendLine!.replace(/^\│/, "").search(/\S/)).toBeGreaterThan(1);
+    expect(trendLine!.replace(/^│/, "").search(/\S/)).toBeGreaterThan(1);
     const legendLine = lines.find((line) => line.includes("Cost(·$)") && line.includes("Output(x)"));
     expect(legendLine).toBeDefined();
-    expect(legendLine!.replace(/^\│/, "").search(/\S/)).toBeGreaterThan(1);
+    expect(legendLine!.replace(/^│/, "").search(/\S/)).toBeGreaterThan(1);
     // Every framed body row is exactly `width` columns (no wrapped right border).
     for (const line of lines) {
       expect(displayWidth(line)).toBe(120);
@@ -134,6 +134,46 @@ describe("UsageDashboardComponent.render", () => {
     for (const line of lines) {
       expect(displayWidth(line)).toBeLessThanOrEqual(120);
     }
+  });
+
+  it("WEB1: browser renderer is ASCII-safe and keeps model columns aligned", async () => {
+    const mainDeps = await makeDeps();
+    const main = new UsageDashboardComponent({ ...mainDeps, renderTarget: "web" });
+    const mainLines = main.render(92);
+    const mainText = mainLines.join("\n");
+    expect(mainText).toContain("USAGE STATISTICS");
+    expect(mainText).toContain("TREND");
+    expect(mainText).not.toContain("████");
+    expect(mainText).not.toContain("📚");
+    expect(mainText).not.toContain("┌");
+    expect(mainLines.every((line) => /^[\x20-\x7e]*$/.test(line))).toBe(true);
+    expect(mainLines.every((line) => line.length <= 92)).toBe(true);
+    main.dispose();
+
+    const store = await makeManyModelStore(3);
+    const models = new UsageDashboardComponent({
+      store,
+      projectCwd: "/projects/p1",
+      renderTarget: "web",
+    });
+    models.handleInput("m");
+    const modelLines = models.render(92);
+    const header = modelLines.find((line) => line.startsWith("Model") && line.includes("Requests"));
+    const dataLines = modelLines.filter((line) => line.includes("model-"));
+    expect(header).toBeDefined();
+    expect(dataLines).toHaveLength(3);
+    const separatorIndexes = (line: string): number[] =>
+      Array.from(line)
+        .map((char, index) => (char === "|" ? index : -1))
+        .filter((index) => index >= 0);
+    const expectedSeparators = separatorIndexes(header!);
+    expect(expectedSeparators).toHaveLength(4);
+    for (const line of dataLines) {
+      expect(line.length).toBe(92);
+      expect(separatorIndexes(line)).toEqual(expectedSeparators);
+      expect(line).toMatch(/^[\x20-\x7e]*$/);
+    }
+    models.dispose();
   });
 
   it("AC1/AC2: main view has no model table; m opens five-column models view with separators", async () => {
@@ -442,6 +482,19 @@ describe("UsageDashboardComponent.handleInput", () => {
     component.handleInput("q");
     component.handleInput("\u001b");
     component.handleInput("\u001b[27u");
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("AC8: Ctrl+C closes the dashboard directly from the models view", async () => {
+    const deps = await makeDeps();
+    const onDone = vi.fn();
+    const component = new UsageDashboardComponent(deps, undefined, onDone);
+
+    component.handleInput("m");
+    expect(component.currentViewMode).toBe("models");
+    component.handleInput("\x03");
+    expect(onDone).toHaveBeenCalledTimes(1);
+    component.handleInput("\x03");
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
